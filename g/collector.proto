@@ -1,0 +1,31 @@
+syntax = "proto3";
+package g;
+
+import "trace.proto";
+import "google/protobuf/empty.proto";
+
+
+option go_package = "github.com/mingoooo/tail-based-sampling/g";
+
+message OK {
+    bool ok = 1;
+}
+
+message TraceID {
+    string ID = 1;
+}
+
+message AgentStatus {
+    enum Status {
+        RUNNING = 0;
+        CONFIRM = 1;
+        CLOSED = 2;
+    }
+    Status status = 1;
+}
+
+service Collector {
+    rpc SendTrace(stream Trace) returns(google.protobuf.Empty){}
+    rpc SubscribeTraceID(google.protobuf.Empty) returns(stream TraceID){}
+    rpc ConfirmFinish(stream AgentStatus) returns(stream OK){}
+}
