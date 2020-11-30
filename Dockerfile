@@ -6,4 +6,4 @@ RUN go build
 FROM alpine
 
 COPY --from=build-stage /app/tail-based-sampling ./
-CMD [ "./tail-based-sampling", "-p", "$SERVER_PORT" ] 
+CMD [ "./tail-based-sampling" ] 

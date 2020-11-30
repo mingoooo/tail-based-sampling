@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"flag"
 	"log"
+	"os"
 
 	"github.com/mingoooo/tail-based-sampling/agent"
 	"github.com/mingoooo/tail-based-sampling/collector"
@@ -14,8 +14,7 @@ var (
 )
 
 func main() {
-	flag.StringVar(&httpPort, "p", "", "port")
-	flag.Parse()
+	httpPort := os.Getenv("SERVER_PORT")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	switch httpPort {
