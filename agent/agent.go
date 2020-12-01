@@ -48,8 +48,8 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		ReadLimit:     512 * 1024 * 1024,
 		curContentLen: -1,
 		finishWg:      &sync.WaitGroup{},
-		traceCh:       make(chan *pb.Trace, 64),
-		tidCh:         make(chan *pb.TraceID, 64),
+		traceCh:       make(chan *pb.Trace, 128),
+		tidCh:         make(chan *pb.TraceID, 128),
 	}
 	var err error
 	r.Postman, err = NewPostman(fmt.Sprintf("127.0.0.1:%s", "8003"), r.HttpPort)
@@ -62,6 +62,19 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 
 // Run is entrypoint
 func (r Receiver) Run(ctx context.Context, cancel context.CancelFunc) (err error) {
+	go func() {
+		defer cancel()
+		r.finishWg.Add(1)
+		r.finishWg.Wait()
+		for {
+			if err := r.Postman.ConfirmFinish(r.traceCh, r.tidCh); err != nil {
+				log.Println(err)
+				continue
+			}
+			log.Printf("Done")
+			return
+		}
+	}()
 	r.RunHTTPSvr()
 	return
 }

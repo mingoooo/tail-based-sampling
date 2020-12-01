@@ -8,16 +8,6 @@ import (
 )
 
 func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
-	go func() {
-		for {
-			r.finishWg.Add(1)
-			r.finishWg.Wait()
-			if err := r.Postman.ConfirmFinish(r.traceCh, r.tidCh); err != nil {
-				log.Println(err)
-			}
-			log.Printf("Done")
-		}
-	}()
 	go r.TraceSearcher()
 	go func() {
 		for {

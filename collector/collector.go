@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -59,7 +58,7 @@ func New(httpPort, rpcPort string, agents []string) *Collector {
 		AgentConfirmWg: &sync.WaitGroup{},
 	}
 	for _, a := range c.AgentList {
-		c.AgentTaskChMap[a] = make(chan *pb.Trace, 32)
+		c.AgentTaskChMap[a] = make(chan *pb.Trace, 128)
 		c.AgentFinishWg.Add(1)
 		c.AgentConfirmWg.Add(1)
 	}
@@ -84,7 +83,8 @@ func (c Collector) SendFinish() {
 		log.Fatalln(err)
 		return
 	}
-	log.Println(ioutil.ReadAll(resp.Body))
+	log.Printf(resp.Status)
+	// log.Println(ioutil.ReadAll(resp.Body))
 }
 
 func (c *Collector) GetMd5BySpans(spans []*pb.Span) string {
