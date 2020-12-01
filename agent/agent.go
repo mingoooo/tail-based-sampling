@@ -62,25 +62,8 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 
 // Run is entrypoint
 func (r Receiver) Run(ctx context.Context, cancel context.CancelFunc) (err error) {
-	go func() {
-		defer cancel()
-		r.finishWg.Add(1)
-		r.finishWg.Wait()
-		for {
-			if err := r.Postman.ConfirmFinish(r.traceCh, r.tidCh); err != nil {
-				log.Println(err)
-				continue
-			}
-			log.Printf("Done")
-			return
-		}
-	}()
 	r.RunHTTPSvr()
 	return
-}
-
-func (r *Receiver) NotifyFinish(ctx context.Context, cancel context.CancelFunc) {
-	r.finishWg.Wait()
 }
 
 func (r *Receiver) getRange() (int64, error) {
@@ -144,8 +127,9 @@ func (r *Receiver) PullData(preTail []byte) error {
 		for {
 			line, err := reader.ReadBytes('\n')
 			// log.Printf(string(line))
-			if len(preTail) < 1 {
+			if len(preTail) > 0 {
 				line = append(preTail, line...)
+				preTail = []byte{}
 			}
 			if err == io.EOF {
 				// r.pullData(line, true)

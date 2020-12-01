@@ -3,11 +3,25 @@ package agent
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/valyala/fasthttp"
 )
 
 func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
+	go func() {
+		defer os.Exit(0)
+		r.finishWg.Add(1)
+		r.finishWg.Wait()
+		for {
+			if err := r.Postman.ConfirmFinish(r.traceCh, r.tidCh); err != nil {
+				log.Println(err)
+				continue
+			}
+			log.Printf("Done")
+			return
+		}
+	}()
 	go r.TraceSearcher()
 	go func() {
 		for {
@@ -31,7 +45,7 @@ func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
 func (r *Receiver) SetParamHandler(ctx *fasthttp.RequestCtx) {
 	r.DataPort = string(ctx.QueryArgs().Peek("port"))
 	// TODO: TEST
-	// r.DataPort = "8081"
+	r.DataPort = "8082"
 	r.DataURL = fmt.Sprintf("http://127.0.0.1:%s/trace%s.data", r.DataPort, r.DataSuffix)
 
 	go r.PullData([]byte{})

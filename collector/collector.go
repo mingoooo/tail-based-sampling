@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -37,7 +38,7 @@ func (c *Collector) Run(ctx context.Context, cancel context.CancelFunc) error {
 	go func() {
 		err := c.RunRPCSvr()
 		if err != nil {
-			cancel()
+			log.Fatalln(err)
 		}
 	}()
 	c.RunHTTPSvr()
@@ -67,7 +68,6 @@ func New(httpPort, rpcPort string, agents []string) *Collector {
 
 func (c Collector) SendFinish() {
 	c.AgentFinishWg.Wait()
-	log.Printf("Done")
 
 	c.ResultMu.Lock()
 	result, err := json.Marshal(c.Result)
@@ -75,6 +75,7 @@ func (c Collector) SendFinish() {
 		log.Fatalln(err)
 		return
 	}
+	c.ResultMu.Unlock()
 	data := make(url.Values)
 	data.Add("result", utils.ByteSliceToString(result))
 
@@ -83,8 +84,10 @@ func (c Collector) SendFinish() {
 		log.Fatalln(err)
 		return
 	}
-	log.Printf(resp.Status)
-	// log.Println(ioutil.ReadAll(resp.Body))
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("Done")
+		os.Exit(0)
+	}
 }
 
 func (c *Collector) GetMd5BySpans(spans []*pb.Span) string {
