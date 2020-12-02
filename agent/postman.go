@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"io"
+	"log"
 	"time"
 
 	pb "github.com/mingoooo/tail-based-sampling/g"
@@ -38,7 +39,7 @@ func (p Postman) TracePublisher(ch <-chan *pb.Trace) error {
 		return err
 	}
 	defer stream.CloseSend()
-	m := map[string]bool{}
+	// m := map[string]bool{}
 
 	for {
 		trace, ok := <-ch
@@ -47,10 +48,10 @@ func (p Postman) TracePublisher(ch <-chan *pb.Trace) error {
 		}
 
 		// TODO: find out double send and need to fix
-		if m[trace.TraceID] {
-			continue
-		}
-		m[trace.TraceID] = true
+		// if m[trace.TraceID] {
+		// 	continue
+		// }
+		// m[trace.TraceID] = true
 		// log.Println(trace.TraceID)
 		if err := stream.Send(trace); err != nil {
 			return err
@@ -83,7 +84,7 @@ func (p Postman) TraceIDSubscriber(ch chan<- *pb.TraceID) error {
 
 func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidCh chan *pb.TraceID) error {
 	// TODO: TEST
-	time.Sleep(5 * time.Second)
+	// time.Sleep(5 * time.Second)
 	client := pb.NewCollectorClient(p.conn)
 	c := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("FromAgent", p.AgentName))
 	stream, err := client.ConfirmFinish(c)
@@ -93,19 +94,21 @@ func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidCh chan *pb.TraceID) 
 	defer stream.CloseSend()
 
 	// Wating other agent
+	log.Printf("Send confirm")
 	err = stream.Send(&pb.AgentStatus{Status: pb.AgentStatus_CONFIRM})
 	if err != nil {
 		return err
 	}
-	for {
-		ok, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
 
+	ok, err := stream.Recv()
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	for {
 		// fmt.Println(len(tidCh))
 		// fmt.Println(len(traceCh))
 		if ok.Ok && len(tidCh) < 1 && len(traceCh) < 1 {
@@ -116,23 +119,20 @@ func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidCh chan *pb.TraceID) 
 	}
 
 	// finish
+	log.Printf("Send closed")
 	err = stream.Send(&pb.AgentStatus{Status: pb.AgentStatus_CLOSED})
 	if err != nil {
 		return err
 	}
 
-	for {
-		ok, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if ok.Ok {
-			return nil
-		}
+	ok, err = stream.Recv()
+	if err == io.EOF {
+		return nil
 	}
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (p *Postman) connect() (err error) {

@@ -9,8 +9,10 @@ import (
 )
 
 func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
+	log.Printf("Ready")
 	go func() {
 		defer os.Exit(0)
+		// defer trace.Stop()
 		r.finishWg.Add(1)
 		r.finishWg.Wait()
 		for {
@@ -43,9 +45,10 @@ func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
 }
 
 func (r *Receiver) SetParamHandler(ctx *fasthttp.RequestCtx) {
+	log.Printf("Set param")
 	r.DataPort = string(ctx.QueryArgs().Peek("port"))
 	// TODO: TEST
-	r.DataPort = "8082"
+	// r.DataPort = "8081"
 	r.DataURL = fmt.Sprintf("http://127.0.0.1:%s/trace%s.data", r.DataPort, r.DataSuffix)
 
 	go r.PullData([]byte{})
@@ -66,5 +69,5 @@ func (r *Receiver) RunHTTPSvr() {
 		}
 	}
 
-	fasthttp.ListenAndServe(fmt.Sprintf(":%s", r.HttpPort), m)
+	fasthttp.ListenAndServe(fmt.Sprintf(":%s", r.HTTPPort), m)
 }

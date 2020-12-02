@@ -68,7 +68,8 @@ func (c *Collector) SendTrace(stream pb.Collector_SendTraceServer) error {
 		// receive
 		trace, err := stream.Recv()
 		if err == io.EOF {
-			return stream.SendAndClose(&empty.Empty{})
+			// return stream.SendAndClose(&empty.Empty{})
+			return nil
 		}
 		if err != nil {
 			return err
@@ -77,22 +78,23 @@ func (c *Collector) SendTrace(stream pb.Collector_SendTraceServer) error {
 		// store trace
 		if len(trace.SpanList) > 0 {
 			// log.Printf("Store trace id of spans: %s", trace.TraceID)
-			if s, ok := c.TraceCache.LoadOrStore(trace.TraceID, trace.SpanList); ok {
-				c.TraceCache.Store(trace.TraceID, append(s.([]*pb.Span), trace.SpanList...))
-				// log.Println(s)
+			c.TraceCacheLocker.Lock()
+			// flush trace to result
+			if spans, ok := c.TraceCache[trace.TraceID]; ok {
+				c.TraceCache[trace.TraceID] = append(spans, trace.SpanList...)
+				// c.FlushTrace(trace.TraceID)
+				// delete(c.TraceCache, trace.TraceID)
+			} else {
+				c.TraceCache[trace.TraceID] = trace.SpanList
 			}
-		}
-
-		// get trace from other agent
-		if trace.EndSpan {
+			c.TraceCacheLocker.Unlock()
+		} else {
+			// send to other agent
 			for agent, ch := range c.AgentTaskChMap {
 				if agent != fromAgent {
 					ch <- trace
 				}
 			}
-		} else {
-			// TODO: since only two client so another request will be cover all spans
-			go c.StoreResult(trace.TraceID)
 		}
 	}
 
@@ -146,15 +148,14 @@ func (c *Collector) RunRPCSvr() error {
 		PermitWithoutStream: true,            // Allow pings even when there are no active streams
 	}
 	kasp := keepalive.ServerParameters{
-		MaxConnectionIdle: 15 * time.Minute, // If a client is idle for 15 seconds, send a GOAWAY
+		MaxConnectionIdle: 30 * time.Minute, // If a client is idle for 15 seconds, send a GOAWAY
 		// MaxConnectionAge:      30 * time.Second, // If any connection is alive for more than 30 seconds, send a GOAWAY
 		// MaxConnectionAgeGrace: 60 * time.Second, // Allow 60 seconds for pending RPCs to complete before forcibly closing connections
 		// Time:                  5 * time.Second,  // Ping the client if it is idle for 5 seconds to ensure the connection is still active
-		Timeout: 1 * time.Minute, // Wait 1 second for the ping ack before assuming the connection is dead
+		Timeout: 1 * time.Second, // Wait 1 second for the ping ack before assuming the connection is dead
 	}
 	grpcServer := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
 	// grpcServer := grpc.NewServer(grpc.EmptyServerOption{})
 	pb.RegisterCollectorServer(grpcServer, c)
-	grpcServer.Serve(lis)
-	return nil
+	return grpcServer.Serve(lis)
 }

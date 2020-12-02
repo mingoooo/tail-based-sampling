@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	pb "github.com/mingoooo/tail-based-sampling/g"
 	"github.com/mingoooo/tail-based-sampling/utils"
@@ -17,19 +17,24 @@ import (
 
 // Receiver struct
 type Receiver struct {
-	HttpPort      string
-	DataURL       string
-	DataPort      string
-	DataSuffix    string
-	startIndex    int64
-	endIndex      int64
-	ReadLimit     int64
-	curContentLen int64
-	finishWg      *sync.WaitGroup
-	Cache         *Cache
-	Postman       *Postman
-	traceCh       chan *pb.Trace
-	tidCh         chan *pb.TraceID
+	HTTPPort       string
+	DataURL        string
+	DataPort       string
+	DataSuffix     string
+	startIndex     int64
+	endIndex       int64
+	ReadLimit      int64
+	curContentLen  int64
+	finishWg       *sync.WaitGroup
+	Cache          *Cache
+	Postman        *Postman
+	traceCh        chan *pb.Trace
+	tidCh          chan *pb.TraceID
+	errPosIDMap    *sync.Map
+	errTidMark     *sync.Map
+	curPos         int64
+	searchLen      int64
+	flushPosTidMap map[int64]string
 }
 
 type Span struct {
@@ -41,18 +46,22 @@ type Span struct {
 // New agent
 func New(httpPort string, dataSuffix string) (*Receiver, error) {
 	r := &Receiver{
-		HttpPort:      httpPort,
-		DataSuffix:    dataSuffix,
-		Cache:         newCache(40000),
-		endIndex:      512 * 1024 * 1024,
-		ReadLimit:     512 * 1024 * 1024,
-		curContentLen: -1,
-		finishWg:      &sync.WaitGroup{},
-		traceCh:       make(chan *pb.Trace, 128),
-		tidCh:         make(chan *pb.TraceID, 128),
+		HTTPPort:       httpPort,
+		DataSuffix:     dataSuffix,
+		Cache:          newCache(128 * 1024 * 1024),
+		endIndex:       8 * 1024 * 1024,
+		ReadLimit:      8 * 1024 * 1024,
+		curContentLen:  -1,
+		finishWg:       &sync.WaitGroup{},
+		traceCh:        make(chan *pb.Trace, 128),
+		tidCh:          make(chan *pb.TraceID, 128),
+		errPosIDMap:    &sync.Map{},
+		errTidMark:     &sync.Map{},
+		flushPosTidMap: map[int64]string{},
+		searchLen:      40000,
 	}
 	var err error
-	r.Postman, err = NewPostman(fmt.Sprintf("127.0.0.1:%s", "8003"), r.HttpPort)
+	r.Postman, err = NewPostman(fmt.Sprintf("127.0.0.1:%s", "8003"), r.HTTPPort)
 	if err != nil {
 		return r, err
 	}
@@ -79,7 +88,7 @@ func (r *Receiver) getRange() (int64, error) {
 }
 
 func (r *Receiver) httpGet() (io.ReadCloser, error) {
-	log.Printf("Pulling data... URL:%s \nstart index: %d\nend index: %d", r.DataURL, r.startIndex, r.endIndex)
+	// log.Printf("Pulling data... URL:%s \nstart index: %d\nend index: %d", r.DataURL, r.startIndex, r.endIndex)
 	req, err := http.NewRequest("GET", r.DataURL, nil)
 	if err != nil {
 		return nil, err
@@ -96,7 +105,6 @@ func (r *Receiver) httpGet() (io.ReadCloser, error) {
 		r.curContentLen = resp.ContentLength
 	}
 	return resp.Body, err
-
 }
 
 func (r *Receiver) PullData(preTail []byte) error {
@@ -115,7 +123,7 @@ func (r *Receiver) PullData(preTail []byte) error {
 
 	for {
 		if r.curContentLen != -1 && r.curContentLen < r.ReadLimit {
-			return nil
+			break
 		}
 		resp, err := r.httpGet()
 		if err != nil {
@@ -140,12 +148,69 @@ func (r *Receiver) PullData(preTail []byte) error {
 				return err
 			}
 
+			// TODO: slop
+			atomic.AddInt64(&r.curPos, 1)
 			s := NewSpan(line)
-			r.setCache(s.TraceID, s.Raw)
-			if s.Wrong {
-				go r.SendTraceBySpan(s)
+
+			if _, ok := r.Cache.Get(s.TraceID); !ok {
+				r.flushPosTidMap[r.curPos+r.searchLen] = s.TraceID
 			}
+			r.setCache(s.TraceID, s.Raw)
+
+			// send wrong trace id to backend
+			if s.Wrong {
+				// log.Printf("Set trace ID: %s", s.TraceID)
+				if _, ok := r.errTidMark.LoadOrStore(s.TraceID, true); !ok {
+					if tids, ok := r.errPosIDMap.LoadOrStore(r.curPos+r.searchLen, []string{s.TraceID}); ok {
+						r.errPosIDMap.Store(r.curPos+r.searchLen, append(tids.([]string), s.TraceID))
+					}
+					r.SetErrTraceID(s.TraceID)
+				}
+			}
+
+			if tids, ok := r.errPosIDMap.Load(r.curPos); ok {
+				for _, tid := range tids.([]string) {
+					i := tid
+					// log.Printf("Send trace: %s", i)
+					r.SendTraceByID(i)
+					r.errTidMark.Delete(i)
+				}
+				r.errPosIDMap.Delete(r.curPos)
+				// cleanLen := r.curPos - r.searchLen*2
+				// if cleanLen > 0 {
+				// 	log.Printf("Clean cache")
+				// 	r.Cache.Clean(cleanLen)
+				// }
+			}
+			// go r.SendTraceBySpan(s)
+
+			// flush trace
+			if r.curPos > r.searchLen {
+				if tid, ok := r.flushPosTidMap[r.curPos]; ok {
+					if _, ok := r.errTidMark.Load(tid); ok {
+						r.SendTraceByID(tid)
+					} else {
+						r.Cache.UnsafeDelete(tid)
+						delete(r.flushPosTidMap, r.curPos)
+						// log.Printf("Delete trace id: %s", tid)
+					}
+				}
+			}
+
 		}
+	}
+
+	log.Printf("Flush all traces")
+	r.errTidMark.Range(func(key, _ interface{}) bool {
+		r.SendTraceByID(key.(string))
+		return true
+	})
+	return nil
+}
+
+func (r *Receiver) SendTraceByID(tid string) {
+	if trace, ok := r.DropTraceByID(tid); ok {
+		r.traceCh <- trace
 	}
 }
 
@@ -155,14 +220,33 @@ func (r *Receiver) TraceSearcher() {
 		if !ok {
 			return
 		}
-		if trace, ok := r.GetTraceByID(t.ID); ok {
-			r.traceCh <- trace
-		}
+		r.errTidMark.LoadOrStore(t.ID, true)
+		// if _, ok := r.errTidMark.LoadOrStore(t.ID, true); !ok {
+		// if _, o := r.errPosIDMap.Load(atomic.LoadInt64(&r.curPos) + r.searchLen); o {
+		// 	log.Printf("Set pos from searcher: exist")
+		// }
+		// pos := atomic.LoadInt64(&r.curPos) + r.searchLen
+		// if tids, ok := r.errPosIDMap.LoadOrStore(pos, []string{t.ID}); ok {
+		// 	r.errPosIDMap.Store(pos, append(tids.([]string), t.ID))
+		// }
+		// }
+		// if trace, ok := r.GetTraceByID(t.ID); ok {
+		// 	r.traceCh <- trace
+		// }
 	}
 }
 
-func (r *Receiver) GetTraceByID(tid string) (*pb.Trace, bool) {
-	spans := r.Cache.Get(tid)
+func (r *Receiver) SetErrTraceID(tid string) {
+	t := &pb.Trace{
+		TraceID:  tid,
+		EndSpan:  false,
+		SpanList: []*pb.Span{},
+	}
+	r.traceCh <- t
+}
+
+func (r *Receiver) DropTraceByID(tid string) (*pb.Trace, bool) {
+	spans := r.Cache.Drop(tid)
 	if len(spans) < 1 {
 		return nil, false
 	}
@@ -185,8 +269,8 @@ func (r Receiver) SendTraceBySpan(s *Span) {
 		SpanList: []*pb.Span{},
 	}
 	// TODO: TEST
-	time.Sleep(5 * time.Second)
-	spans := r.Cache.Get(s.TraceID)
+	// time.Sleep(5 * time.Second)
+	spans := r.Cache.Drop(s.TraceID)
 	if len(spans) > 0 {
 		for _, s := range spans {
 			trace.SpanList = append(trace.SpanList, ParseSpan(s))

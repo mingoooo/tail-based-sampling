@@ -20,17 +20,17 @@ import (
 
 // Collector struct
 type Collector struct {
-	Result   map[string]string
-	ResultMu *sync.Mutex
 	pb.UnsafeCollectorServer
-	HTTPPort       string
-	RPCPort        string
-	DataPort       string
-	AgentTaskChMap map[string]chan *pb.Trace
-	AgentList      []string
-	AgentFinishWg  *sync.WaitGroup
-	AgentConfirmWg *sync.WaitGroup
-	TraceCache     *sync.Map
+	Result           map[string]string
+	HTTPPort         string
+	RPCPort          string
+	DataPort         string
+	AgentTaskChMap   map[string]chan *pb.Trace
+	AgentList        []string
+	AgentFinishWg    *sync.WaitGroup
+	AgentConfirmWg   *sync.WaitGroup
+	TraceCache       map[string][]*pb.Span
+	TraceCacheLocker *sync.RWMutex
 }
 
 // Run is entrypoint
@@ -48,15 +48,15 @@ func (c *Collector) Run(ctx context.Context, cancel context.CancelFunc) error {
 // New collector
 func New(httpPort, rpcPort string, agents []string) *Collector {
 	c := &Collector{
-		Result:         map[string]string{},
-		ResultMu:       &sync.Mutex{},
-		TraceCache:     &sync.Map{},
-		HTTPPort:       httpPort,
-		RPCPort:        rpcPort,
-		AgentList:      agents,
-		AgentTaskChMap: map[string]chan *pb.Trace{},
-		AgentFinishWg:  &sync.WaitGroup{},
-		AgentConfirmWg: &sync.WaitGroup{},
+		Result:           map[string]string{},
+		TraceCache:       map[string][]*pb.Span{},
+		TraceCacheLocker: &sync.RWMutex{},
+		HTTPPort:         httpPort,
+		RPCPort:          rpcPort,
+		AgentList:        agents,
+		AgentTaskChMap:   map[string]chan *pb.Trace{},
+		AgentFinishWg:    &sync.WaitGroup{},
+		AgentConfirmWg:   &sync.WaitGroup{},
 	}
 	for _, a := range c.AgentList {
 		c.AgentTaskChMap[a] = make(chan *pb.Trace, 128)
@@ -67,15 +67,16 @@ func New(httpPort, rpcPort string, agents []string) *Collector {
 }
 
 func (c Collector) SendFinish() {
+	defer os.Exit(0)
+	// defer trace.Stop()
 	c.AgentFinishWg.Wait()
+	c.FlushResult()
 
-	c.ResultMu.Lock()
 	result, err := json.Marshal(c.Result)
 	if err != nil {
 		log.Fatalln(err)
 		return
 	}
-	c.ResultMu.Unlock()
 	data := make(url.Values)
 	data.Add("result", utils.ByteSliceToString(result))
 
@@ -86,7 +87,7 @@ func (c Collector) SendFinish() {
 	}
 	if resp.StatusCode == http.StatusOK {
 		log.Printf("Done")
-		os.Exit(0)
+		return
 	}
 }
 
@@ -104,15 +105,27 @@ func (c *Collector) GetMd5BySpans(spans []*pb.Span) string {
 	return strings.ToUpper(hex.EncodeToString(m.Sum(nil)))
 }
 
+func (c *Collector) FlushResult() {
+	for tid, spans := range c.TraceCache {
+		m := c.GetMd5BySpans(spans)
+		c.Result[tid] = m
+	}
+}
+
+func (c *Collector) FlushTrace(tid string) {
+	if spans, ok := c.TraceCache[tid]; ok {
+		m := c.GetMd5BySpans(spans)
+		c.Result[tid] = m
+	}
+}
+
 func (c *Collector) StoreResult(tid string) {
-	spans, ok := c.TraceCache.Load(tid)
+	spans, ok := c.TraceCache[tid]
 	if !ok {
 		return
 	}
-	m := c.GetMd5BySpans(spans.([]*pb.Span))
+	m := c.GetMd5BySpans(spans)
 	// log.Printf("trace id: %s, md5: %s", tid, m)
-	c.ResultMu.Lock()
 	c.Result[tid] = m
-	c.ResultMu.Unlock()
 	// c.TraceCache.Delete(tid)
 }

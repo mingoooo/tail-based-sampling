@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"log"
+
+	// _ "net/http/pprof"
 	"os"
+	// "runtime/trace"
 
 	"github.com/mingoooo/tail-based-sampling/agent"
 	"github.com/mingoooo/tail-based-sampling/collector"
@@ -15,6 +18,17 @@ var (
 
 func main() {
 	httpPort := os.Getenv("SERVER_PORT")
+	// f, err := os.Create(fmt.Sprintf("trace_%s.out", httpPort))
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer f.Close()
+
+	// err = trace.Start(f)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer trace.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	switch httpPort {

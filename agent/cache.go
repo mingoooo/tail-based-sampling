@@ -26,49 +26,71 @@ type Cache struct {
 	// tidToSids map[string][]string
 	// sidToSpan map[string]string
 	sync.RWMutex
-	tidToSpans map[string][]string
-	tidChan    chan string
-	size       int
+	tidToSpans  map[string][]string
+	cleanQueue  []string
+	size        int
+	cleanOffset int64
 }
 
 func newCache(size int) *Cache {
 	t := &Cache{
 		tidToSpans: map[string][]string{},
-		tidChan:    make(chan string, size),
+		cleanQueue: []string{},
 		size:       size,
 	}
 	return t
 }
 
-func (c *Cache) cleanWorker() {
-	for i := 0; i <= c.size/2; i++ {
-		tid := <-c.tidChan
+func (c *Cache) Clean(n int64) {
+	cleanLen := n - c.cleanOffset
+	// log.Println(cleanLen)
+	for _, tid := range c.cleanQueue[:cleanLen] {
 		c.Delete(tid)
 	}
+	c.cleanQueue = c.cleanQueue[cleanLen:]
+	// TODO: slop
+	c.cleanOffset = n
 }
 
 func (c *Cache) Delete(tid string) {
+	// log.Printf("Delete trace id: %s", tid)
 	c.Lock()
 	delete(c.tidToSpans, tid)
 	c.Unlock()
 }
 
-func (c *Cache) Set(key, val string) {
-	spans, exist := c.tidToSpans[key]
-	if !exist {
-		c.tidChan <- key
-		if len(c.tidChan) >= c.size {
-			c.cleanWorker()
-		}
-	}
-	c.Lock()
-	c.tidToSpans[key] = append(spans, val)
-	c.Unlock()
+func (c *Cache) UnsafeDelete(tid string) {
+	// log.Printf("Delete trace id: %s", tid)
+	delete(c.tidToSpans, tid)
 }
 
-func (c *Cache) Get(key string) []string {
+func (c *Cache) Set(tid, span string) {
+	c.Lock()
+	spans := c.tidToSpans[tid]
+	c.tidToSpans[tid] = append(spans, span)
+	c.Unlock()
+	// c.cleanQueue = append(c.cleanQueue, tid)
+	// if !exist {
+	// 	c.tidChan <- tid
+	// 	// if len(c.tidChan) >= c.size {
+	// 	// 	log.Printf("Clean cache")
+	// 	// 	c.cleanWorker()
+	// 	// }
+	// }
+}
+
+func (c *Cache) Get(key string) ([]string, bool) {
 	c.RLock()
-	val := c.tidToSpans[key]
+	val, ok := c.tidToSpans[key]
 	c.RUnlock()
+	return val, ok
+}
+
+func (c *Cache) Drop(key string) []string {
+	// log.Printf("Drop trace id: %s", key)
+	c.Lock()
+	val := c.tidToSpans[key]
+	delete(c.tidToSpans, key)
+	c.Unlock()
 	return val
 }
