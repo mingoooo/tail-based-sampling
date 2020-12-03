@@ -3,7 +3,6 @@ package agent
 import (
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/valyala/fasthttp"
 )
@@ -11,12 +10,13 @@ import (
 func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
 	log.Printf("Ready")
 	go func() {
-		defer os.Exit(0)
+		// defer os.Exit(0)
 		// defer trace.Stop()
+
 		r.finishWg.Add(1)
 		r.finishWg.Wait()
 		for {
-			if err := r.Postman.ConfirmFinish(r.traceCh, r.tidCh); err != nil {
+			if err := r.Postman.ConfirmFinish(r.traceCh, r.errTidSubCh, r.errTidPubCh); err != nil {
 				log.Println(err)
 				continue
 			}
@@ -24,20 +24,34 @@ func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	}()
-	go r.TraceSearcher()
+	go r.TraceMarker()
 	go func() {
 		for {
 			if err := r.Postman.TracePublisher(r.traceCh); err != nil {
 				log.Println(err)
+				continue
 			}
+			return
 		}
 	}()
 
 	go func() {
 		for {
-			if err := r.Postman.TraceIDSubscriber(r.tidCh); err != nil {
+			if err := r.Postman.TraceIDSubscriber(r.errTidSubCh); err != nil {
 				log.Println(err)
+				continue
 			}
+			return
+		}
+	}()
+
+	go func() {
+		for {
+			if err := r.Postman.ErrTraceIdPublisher(r.errTidPubCh); err != nil {
+				log.Println(err)
+				continue
+			}
+			return
 		}
 	}()
 

@@ -31,6 +31,32 @@ func NewPostman(url, agentName string) (*Postman, error) {
 type WrongTrace struct {
 }
 
+func (p Postman) ErrTraceIdPublisher(ch <-chan *pb.TraceID) error {
+	client := pb.NewCollectorClient(p.conn)
+	c := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("FromAgent", p.AgentName))
+	stream, err := client.SetErrTraceID(c)
+	if err != nil {
+		return err
+	}
+	defer stream.CloseSend()
+
+	for {
+		tid, ok := <-ch
+		if !ok {
+			return nil
+		}
+
+		err := stream.Send(tid)
+		if err == io.EOF {
+			log.Printf("%s received EOF in TracePublisher", p.AgentName)
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
 func (p Postman) TracePublisher(ch <-chan *pb.Trace) error {
 	client := pb.NewCollectorClient(p.conn)
 	c := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("FromAgent", p.AgentName))
@@ -39,7 +65,6 @@ func (p Postman) TracePublisher(ch <-chan *pb.Trace) error {
 		return err
 	}
 	defer stream.CloseSend()
-	// m := map[string]bool{}
 
 	for {
 		trace, ok := <-ch
@@ -47,13 +72,13 @@ func (p Postman) TracePublisher(ch <-chan *pb.Trace) error {
 			return nil
 		}
 
-		// TODO: find out double send and need to fix
-		// if m[trace.TraceID] {
-		// 	continue
-		// }
-		// m[trace.TraceID] = true
 		// log.Println(trace.TraceID)
-		if err := stream.Send(trace); err != nil {
+		err := stream.Send(trace)
+		if err == io.EOF {
+			log.Printf("%s received EOF in TracePublisher", p.AgentName)
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -71,7 +96,8 @@ func (p Postman) TraceIDSubscriber(ch chan<- *pb.TraceID) error {
 	for {
 		in, err := stream.Recv()
 		if err == io.EOF {
-			break
+			log.Printf("%s received EOF in TraceIDSubscriber", p.AgentName)
+			return nil
 		}
 		if err != nil {
 			return err
@@ -79,12 +105,9 @@ func (p Postman) TraceIDSubscriber(ch chan<- *pb.TraceID) error {
 		// log.Printf("Receive trace id: %s", in.ID)
 		ch <- in
 	}
-	return nil
 }
 
-func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidCh chan *pb.TraceID) error {
-	// TODO: TEST
-	// time.Sleep(5 * time.Second)
+func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidSubCh chan *pb.TraceID, tidPubCh chan *pb.TraceID) error {
 	client := pb.NewCollectorClient(p.conn)
 	c := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("FromAgent", p.AgentName))
 	stream, err := client.ConfirmFinish(c)
@@ -93,46 +116,40 @@ func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidCh chan *pb.TraceID) 
 	}
 	defer stream.CloseSend()
 
-	// Wating other agent
+	// wait for set remaning trace ids
+	for {
+		if len(tidPubCh) < 1 {
+			close(tidPubCh)
+			break
+		}
+	}
+
 	log.Printf("Send confirm")
 	err = stream.Send(&pb.AgentStatus{Status: pb.AgentStatus_CONFIRM})
 	if err != nil {
 		return err
 	}
 
+	// Wait all the agents confirm and transfer trace ids
 	ok, err := stream.Recv()
 	if err == io.EOF {
+		log.Printf("%s received EOF in ConfirmFinish", p.AgentName)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 
+	// Wait for receive and send trace from other agents
 	for {
-		// fmt.Println(len(tidCh))
-		// fmt.Println(len(traceCh))
-		if ok.Ok && len(tidCh) < 1 && len(traceCh) < 1 {
-			close(tidCh)
+		if ok.Ok && len(tidSubCh) < 1 && len(traceCh) < 1 {
+			close(tidSubCh)
 			close(traceCh)
-			break
+			return nil
 		}
+		// log.Printf("confirm tid chan len: %d", len(tidCh))
+		// log.Printf("confirm trace chan len: %d", len(traceCh))
 	}
-
-	// finish
-	log.Printf("Send closed")
-	err = stream.Send(&pb.AgentStatus{Status: pb.AgentStatus_CLOSED})
-	if err != nil {
-		return err
-	}
-
-	ok, err = stream.Recv()
-	if err == io.EOF {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func (p *Postman) connect() (err error) {

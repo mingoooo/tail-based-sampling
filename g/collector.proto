@@ -26,6 +26,7 @@ message AgentStatus {
 
 service Collector {
     rpc SendTrace(stream Trace) returns(google.protobuf.Empty){}
+    rpc SetErrTraceID(stream TraceID) returns(google.protobuf.Empty){}
     rpc SubscribeTraceID(google.protobuf.Empty) returns(stream TraceID){}
     rpc ConfirmFinish(stream AgentStatus) returns(stream OK){}
 }

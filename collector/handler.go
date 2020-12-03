@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"time"
 
@@ -56,8 +57,10 @@ func (c Collector) getAgentNameFromMetadata(ctx context.Context) (string, bool) 
 	}
 	return a[0], ok
 }
+func (c *Collector) SetErrTraceID(stream pb.Collector_SetErrTraceIDServer) error {
+	c.AgentConfirmWg.Add(1)
+	defer c.AgentConfirmWg.Done()
 
-func (c *Collector) SendTrace(stream pb.Collector_SendTraceServer) error {
 	// get agent name
 	fromAgent, ok := c.getAgentNameFromMetadata(stream.Context())
 	if !ok {
@@ -65,60 +68,94 @@ func (c *Collector) SendTrace(stream pb.Collector_SendTraceServer) error {
 	}
 
 	for {
+		tid, err := stream.Recv()
+		if err == io.EOF {
+			log.Printf("Received SetErrTraceID EOF from %s", fromAgent)
+			return stream.SendAndClose(&empty.Empty{})
+		}
+		if err != nil {
+			return err
+		}
+
+		for agent, ch := range c.AgentTaskChMap {
+			if agent != fromAgent {
+				ch <- tid
+			}
+		}
+	}
+
+}
+
+func (c *Collector) SendTrace(stream pb.Collector_SendTraceServer) error {
+	c.AgentFinishWg.Add(1)
+	defer c.AgentFinishWg.Done()
+
+	// get agent name
+	fromAgent, ok := c.getAgentNameFromMetadata(stream.Context())
+	if !ok {
+		return errors.New("Missing metadata")
+	}
+	for {
 		// receive
 		trace, err := stream.Recv()
 		if err == io.EOF {
-			// return stream.SendAndClose(&empty.Empty{})
-			return nil
+			log.Printf("Received SendTrace EOF from %s", fromAgent)
+			return stream.SendAndClose(&empty.Empty{})
 		}
 		if err != nil {
 			return err
 		}
 
 		// store trace
-		if len(trace.SpanList) > 0 {
-			// log.Printf("Store trace id of spans: %s", trace.TraceID)
-			c.TraceCacheLocker.Lock()
+		// log.Printf("Received trace: %s", trace.TraceID)
+		c.TraceCacheLocker.Lock()
+		// Store into cache
+		if spans, ok := c.TraceCache[trace.TraceID]; ok {
+			c.TraceCache[trace.TraceID] = append(spans, trace.SpanList...)
 			// flush trace to result
-			if spans, ok := c.TraceCache[trace.TraceID]; ok {
-				c.TraceCache[trace.TraceID] = append(spans, trace.SpanList...)
-				// c.FlushTrace(trace.TraceID)
-				// delete(c.TraceCache, trace.TraceID)
-			} else {
-				c.TraceCache[trace.TraceID] = trace.SpanList
-			}
-			c.TraceCacheLocker.Unlock()
+			// c.FlushTrace(trace.TraceID)
+			// delete(c.TraceCache, trace.TraceID)
 		} else {
-			// send to other agent
-			for agent, ch := range c.AgentTaskChMap {
-				if agent != fromAgent {
-					ch <- trace
-				}
-			}
+			c.TraceCache[trace.TraceID] = trace.SpanList
+		}
+		c.TraceCacheLocker.Unlock()
+	}
+}
+
+func (c *Collector) SubscribeTraceID(_ *empty.Empty, stream pb.Collector_SubscribeTraceIDServer) error {
+	c.AgentFinishWg.Add(1)
+	defer c.AgentFinishWg.Done()
+
+	// get agent name
+	fromAgent, ok := c.getAgentNameFromMetadata(stream.Context())
+	if !ok {
+		return errors.New("Missing metadata")
+	}
+	ch := c.AgentTaskChMap[fromAgent]
+	for {
+		// send
+		t, ok := <-ch
+		if !ok {
+			log.Printf("Exit SubscribeTraceID for %s", fromAgent)
+			return nil
+		}
+		// log.Printf("Send trace id: %s", t.TraceID)
+		if err := stream.Send(&pb.TraceID{ID: t.ID}); err != nil {
+			return err
 		}
 	}
-
 }
-func (c *Collector) SubscribeTraceID(_ *empty.Empty, stream pb.Collector_SubscribeTraceIDServer) error {
+
+func (c *Collector) ConfirmFinish(stream pb.Collector_ConfirmFinishServer) error {
 	// get agent name
 	fromAgent, ok := c.getAgentNameFromMetadata(stream.Context())
 	if !ok {
 		return errors.New("Missing metadata")
 	}
 	for {
-		// send
-		t := <-c.AgentTaskChMap[fromAgent]
-		// log.Printf("Send trace id: %s", t.TraceID)
-		go func() {
-			stream.Send(&pb.TraceID{ID: t.TraceID})
-		}()
-	}
-}
-
-func (c *Collector) ConfirmFinish(stream pb.Collector_ConfirmFinishServer) error {
-	for {
 		inStatus, err := stream.Recv()
 		if err == io.EOF {
+			log.Printf("Received ConfirmFinish EOF from %s", fromAgent)
 			return nil
 		}
 		if err != nil {
@@ -126,12 +163,16 @@ func (c *Collector) ConfirmFinish(stream pb.Collector_ConfirmFinishServer) error
 		}
 
 		switch inStatus.Status {
-		case pb.AgentStatus_CLOSED:
-			c.AgentFinishWg.Done()
-			stream.Send(&pb.OK{Ok: true})
 		case pb.AgentStatus_CONFIRM:
+			log.Printf("Received confirm")
 			c.AgentConfirmWg.Done()
+			// check the agent tasks has been done
 			c.AgentConfirmWg.Wait()
+			log.Printf("Finish signal")
+			c.closeAgentCh <- true
+
+			// reply agent all the err trace ids has been tranferred
+			c.AgentFinishWg.Done()
 			stream.Send(&pb.OK{Ok: true})
 		}
 	}

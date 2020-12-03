@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	pb "github.com/mingoooo/tail-based-sampling/g"
 	"github.com/mingoooo/tail-based-sampling/utils"
@@ -29,12 +28,13 @@ type Receiver struct {
 	Cache          *Cache
 	Postman        *Postman
 	traceCh        chan *pb.Trace
-	tidCh          chan *pb.TraceID
-	errPosIDMap    *sync.Map
+	errTidSubCh    chan *pb.TraceID
+	errTidPubCh    chan *pb.TraceID
 	errTidMark     *sync.Map
-	curPos         int64
-	searchLen      int64
-	flushPosTidMap map[int64]string
+	curPos         uint64
+	cacheLen       uint64
+	flushPosTidMap map[uint64]string
+	markerExit     chan bool
 }
 
 type Span struct {
@@ -54,11 +54,12 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		curContentLen:  -1,
 		finishWg:       &sync.WaitGroup{},
 		traceCh:        make(chan *pb.Trace, 128),
-		tidCh:          make(chan *pb.TraceID, 128),
-		errPosIDMap:    &sync.Map{},
+		errTidSubCh:    make(chan *pb.TraceID, 128),
+		errTidPubCh:    make(chan *pb.TraceID, 128),
 		errTidMark:     &sync.Map{},
-		flushPosTidMap: map[int64]string{},
-		searchLen:      40000,
+		flushPosTidMap: map[uint64]string{},
+		cacheLen:       100000,
+		markerExit:     make(chan bool),
 	}
 	var err error
 	r.Postman, err = NewPostman(fmt.Sprintf("127.0.0.1:%s", "8003"), r.HTTPPort)
@@ -110,17 +111,6 @@ func (r *Receiver) httpGet() (io.ReadCloser, error) {
 func (r *Receiver) PullData(preTail []byte) error {
 	defer r.finishWg.Done()
 
-	// for {
-	// 	n, err := r.getRange()
-	// 	if err != nil {
-	// 		log.Println(err)
-	// 		continue
-	// 	}
-	// 	if n > 0 {
-	// 		break
-	// 	}
-	// }
-
 	for {
 		if r.curContentLen != -1 && r.curContentLen < r.ReadLimit {
 			break
@@ -140,8 +130,6 @@ func (r *Receiver) PullData(preTail []byte) error {
 				preTail = []byte{}
 			}
 			if err == io.EOF {
-				// r.pullData(line, true)
-				// return nil
 				preTail = line
 				break
 			} else if err != nil {
@@ -149,58 +137,49 @@ func (r *Receiver) PullData(preTail []byte) error {
 			}
 
 			// TODO: slop
-			atomic.AddInt64(&r.curPos, 1)
+			r.curPos++
 			s := NewSpan(line)
 
+			// mark flush pos if not exist
 			if _, ok := r.Cache.Get(s.TraceID); !ok {
-				r.flushPosTidMap[r.curPos+r.searchLen] = s.TraceID
+				r.flushPosTidMap[r.curPos+r.cacheLen] = s.TraceID
 			}
+
+			// stroe into cache
 			r.setCache(s.TraceID, s.Raw)
 
-			// send wrong trace id to backend
 			if s.Wrong {
 				// log.Printf("Set trace ID: %s", s.TraceID)
 				if _, ok := r.errTidMark.LoadOrStore(s.TraceID, true); !ok {
-					if tids, ok := r.errPosIDMap.LoadOrStore(r.curPos+r.searchLen, []string{s.TraceID}); ok {
-						r.errPosIDMap.Store(r.curPos+r.searchLen, append(tids.([]string), s.TraceID))
-					}
+					// send wrong trace id to backend
 					r.SetErrTraceID(s.TraceID)
 				}
 			}
 
-			if tids, ok := r.errPosIDMap.Load(r.curPos); ok {
-				for _, tid := range tids.([]string) {
-					i := tid
-					// log.Printf("Send trace: %s", i)
-					r.SendTraceByID(i)
-					r.errTidMark.Delete(i)
-				}
-				r.errPosIDMap.Delete(r.curPos)
-				// cleanLen := r.curPos - r.searchLen*2
-				// if cleanLen > 0 {
-				// 	log.Printf("Clean cache")
-				// 	r.Cache.Clean(cleanLen)
-				// }
+			if r.curPos <= r.cacheLen {
+				continue
 			}
-			// go r.SendTraceBySpan(s)
 
 			// flush trace
-			if r.curPos > r.searchLen {
-				if tid, ok := r.flushPosTidMap[r.curPos]; ok {
-					if _, ok := r.errTidMark.Load(tid); ok {
-						r.SendTraceByID(tid)
-					} else {
-						r.Cache.UnsafeDelete(tid)
-						delete(r.flushPosTidMap, r.curPos)
-						// log.Printf("Delete trace id: %s", tid)
-					}
+			if tid, ok := r.flushPosTidMap[r.curPos]; ok {
+				if _, ok := r.errTidMark.Load(tid); ok {
+					// send error trace
+					r.SendTraceByID(tid)
+					r.errTidMark.Delete(tid)
+				} else {
+					r.Cache.UnsafeDelete(tid)
 				}
+				delete(r.flushPosTidMap, r.curPos)
 			}
 
 		}
 	}
 
-	log.Printf("Flush all traces")
+	log.Printf("All the data has been pulled")
+	r.markerExit <- true
+	go r.TraceFlusher()
+
+	log.Printf("Flush all the traces in errTidMark")
 	r.errTidMark.Range(func(key, _ interface{}) bool {
 		r.SendTraceByID(key.(string))
 		return true
@@ -213,47 +192,44 @@ func (r *Receiver) SendTraceByID(tid string) {
 		r.traceCh <- trace
 	}
 }
-
-func (r *Receiver) TraceSearcher() {
+func (r *Receiver) TraceFlusher() {
 	for {
-		t, ok := <-r.tidCh
+		t, ok := <-r.errTidSubCh
 		if !ok {
 			return
 		}
-		r.errTidMark.LoadOrStore(t.ID, true)
-		// if _, ok := r.errTidMark.LoadOrStore(t.ID, true); !ok {
-		// if _, o := r.errPosIDMap.Load(atomic.LoadInt64(&r.curPos) + r.searchLen); o {
-		// 	log.Printf("Set pos from searcher: exist")
-		// }
-		// pos := atomic.LoadInt64(&r.curPos) + r.searchLen
-		// if tids, ok := r.errPosIDMap.LoadOrStore(pos, []string{t.ID}); ok {
-		// 	r.errPosIDMap.Store(pos, append(tids.([]string), t.ID))
-		// }
-		// }
-		// if trace, ok := r.GetTraceByID(t.ID); ok {
-		// 	r.traceCh <- trace
-		// }
+		r.SendTraceByID(t.ID)
+	}
+}
+
+func (r *Receiver) TraceMarker() {
+	for {
+		select {
+		case <-r.markerExit:
+			return
+		case t, ok := <-r.errTidSubCh:
+			if !ok {
+				return
+			}
+			r.errTidMark.Store(t.ID, true)
+		}
 	}
 }
 
 func (r *Receiver) SetErrTraceID(tid string) {
-	t := &pb.Trace{
-		TraceID:  tid,
-		EndSpan:  false,
-		SpanList: []*pb.Span{},
+	r.errTidPubCh <- &pb.TraceID{
+		ID: tid,
 	}
-	r.traceCh <- t
 }
 
 func (r *Receiver) DropTraceByID(tid string) (*pb.Trace, bool) {
-	spans := r.Cache.Drop(tid)
+	spans := r.Cache.UnsafeDrop(tid)
 	if len(spans) < 1 {
 		return nil, false
 	}
 
 	t := &pb.Trace{
 		TraceID:  tid,
-		EndSpan:  false,
 		SpanList: []*pb.Span{},
 	}
 	for _, s := range spans {
@@ -265,7 +241,6 @@ func (r *Receiver) DropTraceByID(tid string) (*pb.Trace, bool) {
 func (r Receiver) SendTraceBySpan(s *Span) {
 	trace := &pb.Trace{
 		TraceID:  s.TraceID,
-		EndSpan:  true,
 		SpanList: []*pb.Span{},
 	}
 	// TODO: TEST

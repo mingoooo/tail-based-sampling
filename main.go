@@ -6,7 +6,6 @@ import (
 
 	// _ "net/http/pprof"
 	"os"
-	// "runtime/trace"
 
 	"github.com/mingoooo/tail-based-sampling/agent"
 	"github.com/mingoooo/tail-based-sampling/collector"

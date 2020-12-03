@@ -17,5 +17,5 @@ vendor/
 # vscode
 .vscode/
 
-# scoring
+# scoring application for the testing
 scoring/

@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -25,16 +24,18 @@ type Collector struct {
 	HTTPPort         string
 	RPCPort          string
 	DataPort         string
-	AgentTaskChMap   map[string]chan *pb.Trace
+	AgentTaskChMap   map[string]chan *pb.TraceID
 	AgentList        []string
 	AgentFinishWg    *sync.WaitGroup
 	AgentConfirmWg   *sync.WaitGroup
 	TraceCache       map[string][]*pb.Span
 	TraceCacheLocker *sync.RWMutex
+	closeAgentCh     chan bool
 }
 
 // Run is entrypoint
 func (c *Collector) Run(ctx context.Context, cancel context.CancelFunc) error {
+	go c.closeAllAgentCh()
 	go func() {
 		err := c.RunRPCSvr()
 		if err != nil {
@@ -54,23 +55,70 @@ func New(httpPort, rpcPort string, agents []string) *Collector {
 		HTTPPort:         httpPort,
 		RPCPort:          rpcPort,
 		AgentList:        agents,
-		AgentTaskChMap:   map[string]chan *pb.Trace{},
+		AgentTaskChMap:   map[string]chan *pb.TraceID{},
 		AgentFinishWg:    &sync.WaitGroup{},
 		AgentConfirmWg:   &sync.WaitGroup{},
+		closeAgentCh:     make(chan bool, 8),
 	}
 	for _, a := range c.AgentList {
-		c.AgentTaskChMap[a] = make(chan *pb.Trace, 128)
+		c.AgentTaskChMap[a] = make(chan *pb.TraceID, 128)
 		c.AgentFinishWg.Add(1)
 		c.AgentConfirmWg.Add(1)
 	}
 	return c
 }
 
+func (c *Collector) closeAllAgentCh() {
+	<-c.closeAgentCh
+	for {
+		m := 0
+		for _, ch := range c.AgentTaskChMap {
+			if len(ch) < 1 {
+				m++
+			}
+		}
+		if m == len(c.AgentTaskChMap) {
+			for a, ch := range c.AgentTaskChMap {
+				log.Printf("close agent channel: %s", a)
+				close(ch)
+			}
+			return
+		}
+	}
+
+}
+
 func (c Collector) SendFinish() {
-	defer os.Exit(0)
+	// defer os.Exit(0)
 	// defer trace.Stop()
 	c.AgentFinishWg.Wait()
+	log.Printf("Flush result")
+	// time.Sleep(5 * time.Second)
 	c.FlushResult()
+
+	// TODO: Manually check md5 for testing
+	/**
+	checkSum := map[string]string{}
+	if dir, err := os.Getwd(); err == nil {
+		if checkFile, err := ioutil.ReadFile(fmt.Sprintf("%s/scoring/checkSum.data", dir)); err == nil {
+			json.Unmarshal(checkFile, &checkSum)
+			for tid, mdf := range checkSum {
+				if m, ok := c.Result[tid]; ok {
+					if m != mdf {
+						log.Printf("Wrong md5 of trace: %s", tid)
+						log.Println(c.TraceCache[tid])
+					}
+				} else {
+					log.Printf("Missing trace id: %s", tid)
+				}
+			}
+		} else {
+			log.Println(err)
+		}
+	} else {
+		log.Println(err)
+	}
+	**/
 
 	result, err := json.Marshal(c.Result)
 	if err != nil {

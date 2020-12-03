@@ -94,3 +94,9 @@ func (c *Cache) Drop(key string) []string {
 	c.Unlock()
 	return val
 }
+
+func (c *Cache) UnsafeDrop(key string) []string {
+	val := c.tidToSpans[key]
+	delete(c.tidToSpans, key)
+	return val
+}

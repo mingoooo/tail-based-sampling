@@ -14,7 +14,6 @@ option go_package = "github.com/mingoooo/tail-based-sampling/g";
 message Trace {
     string traceID = 1;
     repeated Span spanList = 2;
-    bool endSpan = 3;
 }
 
 

@@ -19,6 +19,7 @@ const _ = grpc.SupportPackageIsVersion7
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type CollectorClient interface {
 	SendTrace(ctx context.Context, opts ...grpc.CallOption) (Collector_SendTraceClient, error)
+	SetErrTraceID(ctx context.Context, opts ...grpc.CallOption) (Collector_SetErrTraceIDClient, error)
 	SubscribeTraceID(ctx context.Context, in *empty.Empty, opts ...grpc.CallOption) (Collector_SubscribeTraceIDClient, error)
 	ConfirmFinish(ctx context.Context, opts ...grpc.CallOption) (Collector_ConfirmFinishClient, error)
 }
@@ -65,8 +66,42 @@ func (x *collectorSendTraceClient) CloseAndRecv() (*empty.Empty, error) {
 	return m, nil
 }
 
+func (c *collectorClient) SetErrTraceID(ctx context.Context, opts ...grpc.CallOption) (Collector_SetErrTraceIDClient, error) {
+	stream, err := c.cc.NewStream(ctx, &_Collector_serviceDesc.Streams[1], "/g.Collector/SetErrTraceID", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &collectorSetErrTraceIDClient{stream}
+	return x, nil
+}
+
+type Collector_SetErrTraceIDClient interface {
+	Send(*TraceID) error
+	CloseAndRecv() (*empty.Empty, error)
+	grpc.ClientStream
+}
+
+type collectorSetErrTraceIDClient struct {
+	grpc.ClientStream
+}
+
+func (x *collectorSetErrTraceIDClient) Send(m *TraceID) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *collectorSetErrTraceIDClient) CloseAndRecv() (*empty.Empty, error) {
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	m := new(empty.Empty)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func (c *collectorClient) SubscribeTraceID(ctx context.Context, in *empty.Empty, opts ...grpc.CallOption) (Collector_SubscribeTraceIDClient, error) {
-	stream, err := c.cc.NewStream(ctx, &_Collector_serviceDesc.Streams[1], "/g.Collector/SubscribeTraceID", opts...)
+	stream, err := c.cc.NewStream(ctx, &_Collector_serviceDesc.Streams[2], "/g.Collector/SubscribeTraceID", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +133,7 @@ func (x *collectorSubscribeTraceIDClient) Recv() (*TraceID, error) {
 }
 
 func (c *collectorClient) ConfirmFinish(ctx context.Context, opts ...grpc.CallOption) (Collector_ConfirmFinishClient, error) {
-	stream, err := c.cc.NewStream(ctx, &_Collector_serviceDesc.Streams[2], "/g.Collector/ConfirmFinish", opts...)
+	stream, err := c.cc.NewStream(ctx, &_Collector_serviceDesc.Streams[3], "/g.Collector/ConfirmFinish", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -133,6 +168,7 @@ func (x *collectorConfirmFinishClient) Recv() (*OK, error) {
 // for forward compatibility
 type CollectorServer interface {
 	SendTrace(Collector_SendTraceServer) error
+	SetErrTraceID(Collector_SetErrTraceIDServer) error
 	SubscribeTraceID(*empty.Empty, Collector_SubscribeTraceIDServer) error
 	ConfirmFinish(Collector_ConfirmFinishServer) error
 	mustEmbedUnimplementedCollectorServer()
@@ -144,6 +180,9 @@ type UnimplementedCollectorServer struct {
 
 func (UnimplementedCollectorServer) SendTrace(Collector_SendTraceServer) error {
 	return status.Errorf(codes.Unimplemented, "method SendTrace not implemented")
+}
+func (UnimplementedCollectorServer) SetErrTraceID(Collector_SetErrTraceIDServer) error {
+	return status.Errorf(codes.Unimplemented, "method SetErrTraceID not implemented")
 }
 func (UnimplementedCollectorServer) SubscribeTraceID(*empty.Empty, Collector_SubscribeTraceIDServer) error {
 	return status.Errorf(codes.Unimplemented, "method SubscribeTraceID not implemented")
@@ -184,6 +223,32 @@ func (x *collectorSendTraceServer) SendAndClose(m *empty.Empty) error {
 
 func (x *collectorSendTraceServer) Recv() (*Trace, error) {
 	m := new(Trace)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func _Collector_SetErrTraceID_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(CollectorServer).SetErrTraceID(&collectorSetErrTraceIDServer{stream})
+}
+
+type Collector_SetErrTraceIDServer interface {
+	SendAndClose(*empty.Empty) error
+	Recv() (*TraceID, error)
+	grpc.ServerStream
+}
+
+type collectorSetErrTraceIDServer struct {
+	grpc.ServerStream
+}
+
+func (x *collectorSetErrTraceIDServer) SendAndClose(m *empty.Empty) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *collectorSetErrTraceIDServer) Recv() (*TraceID, error) {
+	m := new(TraceID)
 	if err := x.ServerStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
@@ -245,6 +310,11 @@ var _Collector_serviceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "SendTrace",
 			Handler:       _Collector_SendTrace_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "SetErrTraceID",
+			Handler:       _Collector_SetErrTraceID_Handler,
 			ClientStreams: true,
 		},
 		{

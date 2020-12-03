@@ -1,2 +1,4 @@
 scoring/
 *.out
+.vscode/
+.git/
