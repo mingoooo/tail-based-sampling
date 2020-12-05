@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 
 	pb "github.com/mingoooo/tail-based-sampling/g"
@@ -66,8 +65,8 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		HTTPPort:       httpPort,
 		DataSuffix:     dataSuffix,
 		Cache:          newCache(128 * 1024 * 1024),
-		endIndex:       512 * 1024 * 1024,
-		ReadLimit:      512 * 1024 * 1024,
+		endIndex:       8 * 1024 * 1024,
+		ReadLimit:      8 * 1024 * 1024,
 		curContentLen:  -1,
 		finishWg:       &sync.WaitGroup{},
 		traceCh:        make(chan *pb.Trace, 128),
@@ -166,19 +165,24 @@ func (r *Receiver) StartDownload(tasks []*respBlock) error {
 	log.Printf("Start download")
 	go r.readLines(tasks)
 	for _, resp := range tasks {
-		if err := resp.fill(r.inputData); err != nil {
-			return err
-		}
+		go func(rs *respBlock) {
+			if err := rs.fill(r.inputData); err != nil {
+				log.Println(err)
+				return
+			}
+		}(resp)
 	}
 	log.Printf("Exit download")
 	return nil
 }
 
 func (r *Receiver) readLines(resp []*respBlock) {
-	log.Printf("Read lines")
+	defer close(r.ReadLineChan)
+
 	offset := 0
 	for _, reader := range resp {
 		reader.Done.Wait()
+		log.Printf("Read lines")
 		si := reader.StartIdx
 		ei := reader.EndIdx
 		for {
@@ -188,15 +192,14 @@ func (r *Receiver) readLines(resp []*respBlock) {
 			}
 			n := bytes.IndexByte(r.inputData[si:ei], '\n')
 			if n < 0 {
-				offset = ei - si
+				offset = ei - si + 1
 				break
 			}
-			r.ReadLineChan <- NewSpan(r.inputData, si, si+n)
+			r.ReadLineChan <- NewSpan(r.inputData, si, si+n+1)
 			si += n + 1
 		}
+		log.Printf("Exit read lines")
 	}
-	close(r.ReadLineChan)
-	log.Printf("Exit read lines")
 }
 
 func (r *Receiver) Filter(rs []*respBlock) error {
@@ -316,8 +319,6 @@ func (r Receiver) SendTraceBySpan(s *Span) {
 		TraceID:  s.TraceID,
 		SpanList: []*pb.Span{},
 	}
-	// TODO: TEST
-	// time.Sleep(5 * time.Second)
 	spans := r.Cache.Drop(s.TraceID)
 	if len(spans) > 0 {
 		for _, s := range spans {
@@ -359,11 +360,11 @@ func (s Span) Get() []byte {
 }
 
 func ParseSpan(s *Span) *pb.Span {
-	line := utils.ByteSliceToString(s.Get())
-	firstIndex := strings.IndexByte(line, '|')
-	secondIndex := strings.IndexByte(line[firstIndex+1:], '|')
+	line := s.Get()
+	firstIndex := bytes.IndexByte(line, '|')
+	secondIndex := bytes.IndexByte(line[firstIndex+1:], '|')
 	return &pb.Span{
 		Raw:       line,
-		StartTime: line[firstIndex+1 : firstIndex+1+secondIndex],
+		StartTime: utils.ByteSliceToString((line[firstIndex+1 : firstIndex+1+secondIndex])),
 	}
 }

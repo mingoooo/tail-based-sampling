@@ -77,6 +77,7 @@ func (c *Collector) SetErrTraceID(stream pb.Collector_SetErrTraceIDServer) error
 			return err
 		}
 
+		// log.Printf("Received error trace id: %s", tid.ID)
 		for agent, ch := range c.AgentTaskChMap {
 			if agent != fromAgent {
 				ch <- tid
@@ -139,7 +140,7 @@ func (c *Collector) SubscribeTraceID(_ *empty.Empty, stream pb.Collector_Subscri
 			log.Printf("Exit SubscribeTraceID for %s", fromAgent)
 			return nil
 		}
-		// log.Printf("Send trace id: %s", t.TraceID)
+		// log.Printf("Send trace id: %s", t.ID)
 		if err := stream.Send(&pb.TraceID{ID: t.ID}); err != nil {
 			return err
 		}

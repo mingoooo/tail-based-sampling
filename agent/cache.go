@@ -69,14 +69,6 @@ func (c *Cache) Set(tid string, span *Span) {
 	spans := c.tidToSpans[tid]
 	c.tidToSpans[tid] = append(spans, span)
 	c.Unlock()
-	// c.cleanQueue = append(c.cleanQueue, tid)
-	// if !exist {
-	// 	c.tidChan <- tid
-	// 	// if len(c.tidChan) >= c.size {
-	// 	// 	log.Printf("Clean cache")
-	// 	// 	c.cleanWorker()
-	// 	// }
-	// }
 }
 
 func (c *Cache) Get(key string) ([]*Span, bool) {

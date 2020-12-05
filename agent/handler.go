@@ -3,7 +3,6 @@ package agent
 import (
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/valyala/fasthttp"
 )
@@ -63,7 +62,7 @@ func (r *Receiver) SetParamHandler(ctx *fasthttp.RequestCtx) {
 	log.Printf("Set param")
 	r.DataPort = string(ctx.QueryArgs().Peek("port"))
 	// TODO: TEST
-	// r.DataPort = "8082"
+	r.DataPort = "8082"
 	r.DataURL = fmt.Sprintf("http://127.0.0.1:%s/trace%s.data", r.DataPort, r.DataSuffix)
 
 	rs, err := r.GetDataReaders()

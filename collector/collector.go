@@ -94,7 +94,6 @@ func (c Collector) SendFinish() {
 	// defer trace.Stop()
 	c.AgentFinishWg.Wait()
 	log.Printf("Flush result")
-	// time.Sleep(5 * time.Second)
 	c.FlushResult()
 
 	// TODO: Manually check md5 for testing
@@ -153,7 +152,7 @@ func (c *Collector) GetMd5BySpans(spans []*pb.Span) string {
 	for _, s := range spans {
 		// log.Printf(s.StartTime)
 		// log.Printf(s.Raw)
-		m.Write([]byte(s.Raw))
+		m.Write(s.Raw)
 	}
 	return strings.ToUpper(hex.EncodeToString(m.Sum(nil)))
 }
