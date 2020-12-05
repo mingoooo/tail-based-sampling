@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -14,16 +14,21 @@ import (
 	"github.com/mingoooo/tail-based-sampling/utils"
 )
 
+var (
+	TracePool   = sync.Pool{New: func() interface{} { return &pb.Trace{} }}
+	TraceIDPool = sync.Pool{New: func() interface{} { return &pb.TraceID{} }}
+)
+
 // Receiver struct
 type Receiver struct {
 	HTTPPort       string
 	DataURL        string
 	DataPort       string
 	DataSuffix     string
-	startIndex     int64
-	endIndex       int64
-	ReadLimit      int64
-	curContentLen  int64
+	startIndex     int
+	endIndex       int
+	ReadLimit      int
+	curContentLen  int
 	finishWg       *sync.WaitGroup
 	Cache          *Cache
 	Postman        *Postman
@@ -31,16 +36,28 @@ type Receiver struct {
 	errTidSubCh    chan *pb.TraceID
 	errTidPubCh    chan *pb.TraceID
 	errTidMark     *sync.Map
-	curPos         uint64
-	cacheLen       uint64
-	flushPosTidMap map[uint64]string
+	curPos         uint
+	cacheLen       uint
+	flushPosTidMap map[uint]string
 	markerExit     chan bool
+	inputData      []byte
+	respChan       chan *respBlock
+	ReadLineChan   chan *Span
+}
+
+type respBlock struct {
+	Reader   io.Reader
+	StartIdx int
+	EndIdx   int
+	Done     sync.WaitGroup
 }
 
 type Span struct {
-	Raw     string
-	Wrong   bool
-	TraceID string
+	startIdx int
+	endIdx   int
+	buf      []byte
+	Wrong    bool
+	TraceID  string
 }
 
 // New agent
@@ -49,17 +66,20 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		HTTPPort:       httpPort,
 		DataSuffix:     dataSuffix,
 		Cache:          newCache(128 * 1024 * 1024),
-		endIndex:       8 * 1024 * 1024,
-		ReadLimit:      8 * 1024 * 1024,
+		endIndex:       512 * 1024 * 1024,
+		ReadLimit:      512 * 1024 * 1024,
 		curContentLen:  -1,
 		finishWg:       &sync.WaitGroup{},
 		traceCh:        make(chan *pb.Trace, 128),
 		errTidSubCh:    make(chan *pb.TraceID, 128),
 		errTidPubCh:    make(chan *pb.TraceID, 128),
 		errTidMark:     &sync.Map{},
-		flushPosTidMap: map[uint64]string{},
-		cacheLen:       100000,
+		flushPosTidMap: map[uint]string{},
+		cacheLen:       150000,
 		markerExit:     make(chan bool),
+		inputData:      make([]byte, 2*1024*1024*1024),
+		respChan:       make(chan *respBlock, 4),
+		ReadLineChan:   make(chan *Span, 2*1024),
 	}
 	var err error
 	r.Postman, err = NewPostman(fmt.Sprintf("127.0.0.1:%s", "8003"), r.HTTPPort)
@@ -76,20 +96,9 @@ func (r Receiver) Run(ctx context.Context, cancel context.CancelFunc) (err error
 	return
 }
 
-func (r *Receiver) getRange() (int64, error) {
-	req, err := http.NewRequest("HEAD", r.DataURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	return resp.ContentLength, nil
-}
+func (r *Receiver) httpGet() (*respBlock, error) {
+	log.Printf("Pulling data... URL:%s \nstart index: %d\nend index: %d", r.DataURL, r.startIndex, r.endIndex)
 
-func (r *Receiver) httpGet() (io.ReadCloser, error) {
-	// log.Printf("Pulling data... URL:%s \nstart index: %d\nend index: %d", r.DataURL, r.startIndex, r.endIndex)
 	req, err := http.NewRequest("GET", r.DataURL, nil)
 	if err != nil {
 		return nil, err
@@ -103,77 +112,139 @@ func (r *Receiver) httpGet() (io.ReadCloser, error) {
 	switch resp.StatusCode {
 	case http.StatusPartialContent, http.StatusOK:
 		r.startIndex, r.endIndex = r.endIndex+1, r.endIndex+r.ReadLimit
-		r.curContentLen = resp.ContentLength
+		r.curContentLen = int(resp.ContentLength)
 	}
-	return resp.Body, err
+
+	rs := &respBlock{
+		Reader:   resp.Body,
+		Done:     sync.WaitGroup{},
+		StartIdx: r.startIndex,
+		EndIdx:   r.endIndex}
+	rs.Done.Add(1)
+	return rs, err
 }
 
-func (r *Receiver) PullData(preTail []byte) error {
-	defer r.finishWg.Done()
-
+func (r *Receiver) GetDataReaders() (rs []*respBlock, err error) {
 	for {
 		if r.curContentLen != -1 && r.curContentLen < r.ReadLimit {
-			break
+			return rs, err
 		}
 		resp, err := r.httpGet()
 		if err != nil {
+			return rs, err
+		}
+
+		rs = append(rs, resp)
+	}
+}
+
+func (r *respBlock) fill(buf []byte) (err error) {
+	log.Printf("Start fill")
+	defer r.Done.Done()
+	defer log.Printf("Exit fill")
+	// readSize := 8 * 1024 * 1024
+	n := 0
+	i := r.StartIdx
+	for {
+		// if i+readSize <= r.EndIdx {
+		// 	n, err = io.ReadAtLeast(r.Reader, buf[i:], readSize)
+		// } else {
+		n, err = r.Reader.Read(buf[i:])
+		// }
+
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		defer resp.Close()
+		i += n
+	}
+}
 
-		reader := bufio.NewReader(resp)
-		for {
-			line, err := reader.ReadBytes('\n')
-			// log.Printf(string(line))
-			if len(preTail) > 0 {
-				line = append(preTail, line...)
-				preTail = []byte{}
-			}
-			if err == io.EOF {
-				preTail = line
-				break
-			} else if err != nil {
-				return err
-			}
-
-			// TODO: slop
-			r.curPos++
-			s := NewSpan(line)
-
-			// mark flush pos if not exist
-			if _, ok := r.Cache.Get(s.TraceID); !ok {
-				r.flushPosTidMap[r.curPos+r.cacheLen] = s.TraceID
-			}
-
-			// stroe into cache
-			r.setCache(s.TraceID, s.Raw)
-
-			if s.Wrong {
-				// log.Printf("Set trace ID: %s", s.TraceID)
-				if _, ok := r.errTidMark.LoadOrStore(s.TraceID, true); !ok {
-					// send wrong trace id to backend
-					r.SetErrTraceID(s.TraceID)
-				}
-			}
-
-			if r.curPos <= r.cacheLen {
-				continue
-			}
-
-			// flush trace
-			if tid, ok := r.flushPosTidMap[r.curPos]; ok {
-				if _, ok := r.errTidMark.Load(tid); ok {
-					// send error trace
-					r.SendTraceByID(tid)
-					r.errTidMark.Delete(tid)
-				} else {
-					r.Cache.UnsafeDelete(tid)
-				}
-				delete(r.flushPosTidMap, r.curPos)
-			}
-
+func (r *Receiver) StartDownload(tasks []*respBlock) error {
+	log.Printf("Start download")
+	go r.readLines(tasks)
+	for _, resp := range tasks {
+		if err := resp.fill(r.inputData); err != nil {
+			return err
 		}
 	}
+	log.Printf("Exit download")
+	return nil
+}
+
+func (r *Receiver) readLines(resp []*respBlock) {
+	log.Printf("Read lines")
+	offset := 0
+	for _, reader := range resp {
+		reader.Done.Wait()
+		si := reader.StartIdx
+		ei := reader.EndIdx
+		for {
+			if offset != 0 {
+				si -= offset
+				offset = 0
+			}
+			n := bytes.IndexByte(r.inputData[si:ei], '\n')
+			if n < 0 {
+				offset = ei - si
+				break
+			}
+			r.ReadLineChan <- NewSpan(r.inputData, si, si+n)
+			si += n + 1
+		}
+	}
+	close(r.ReadLineChan)
+	log.Printf("Exit read lines")
+}
+
+func (r *Receiver) Filter(rs []*respBlock) error {
+	defer r.finishWg.Done()
+	log.Printf("Filtering...")
+
+	for {
+		s, ok := <-r.ReadLineChan
+		if !ok {
+			break
+		}
+
+		// TODO: slop
+		r.curPos++
+
+		// mark flush pos if not exist
+		if _, ok := r.Cache.Get(s.TraceID); !ok {
+			r.flushPosTidMap[r.curPos+r.cacheLen] = s.TraceID
+		}
+
+		// stroe into cache
+		r.setCache(s)
+
+		if s.Wrong {
+			// log.Printf("Set trace ID: %s", s.TraceID)
+			if _, ok := r.errTidMark.LoadOrStore(s.TraceID, true); !ok {
+				// send wrong trace id to backend
+				r.SetErrTraceID(s.TraceID)
+			}
+		}
+
+		if r.curPos <= r.cacheLen {
+			continue
+		}
+
+		// flush trace
+		if tid, ok := r.flushPosTidMap[r.curPos]; ok {
+			if _, ok := r.errTidMark.Load(tid); ok {
+				// send error trace
+				r.SendTraceByID(tid)
+				r.errTidMark.Delete(tid)
+			} else {
+				r.Cache.UnsafeDelete(tid)
+			}
+			delete(r.flushPosTidMap, r.curPos)
+		}
+	}
+	// r.dataPool.Put(reader)
 
 	log.Printf("All the data has been pulled")
 	r.markerExit <- true
@@ -184,6 +255,8 @@ func (r *Receiver) PullData(preTail []byte) error {
 		r.SendTraceByID(key.(string))
 		return true
 	})
+
+	log.Printf("Exit filter")
 	return nil
 }
 
@@ -255,35 +328,42 @@ func (r Receiver) SendTraceBySpan(s *Span) {
 	r.traceCh <- trace
 }
 
-func (r *Receiver) setCache(tid, line string) {
-	r.Cache.Set(tid, line)
+func (r *Receiver) setCache(s *Span) {
+	r.Cache.Set(s.TraceID, s)
 }
 
-func NewSpan(line []byte) *Span {
-	s := &Span{}
-	s.Raw = utils.ByteSliceToString(line)
-	tidEndIndex := strings.IndexByte(s.Raw, '|')
-	s.TraceID = s.Raw[:tidEndIndex]
-	s.filterWrongSpan()
+func NewSpan(buf []byte, startIdx, endIdx int) *Span {
+	s := &Span{
+		startIdx: startIdx,
+		endIdx:   endIdx,
+		buf:      buf,
+	}
+	line := s.Get()
+	tidEndIndex := bytes.IndexByte(line, '|')
+	s.TraceID = utils.ByteSliceToString(line[:tidEndIndex])
+
+	// filter tag
+	tagFirstIndex := bytes.LastIndexByte(line, '|')
+	tags := line[tagFirstIndex:]
+	if bytes.Index(tags, utils.StringToBytes("error=1")) != -1 {
+		s.Wrong = true
+		return s
+	}
+	if bytes.Index(tags, utils.StringToBytes("http.status_code=")) != -1 && bytes.Index(tags, utils.StringToBytes("http.status_code=200")) == -1 {
+		s.Wrong = true
+	}
 	return s
 }
-
-func (s *Span) filterWrongSpan() {
-	tagFirstIndex := strings.LastIndexByte(s.Raw, '|')
-	tags := s.Raw[tagFirstIndex:]
-	if strings.Index(tags, "error=1") != -1 {
-		s.Wrong = true
-	}
-	if strings.Index(tags, "http.status_code=") != -1 && strings.Index(tags, "http.status_code=200") == -1 {
-		s.Wrong = true
-	}
+func (s Span) Get() []byte {
+	return s.buf[s.startIdx:s.endIdx]
 }
 
-func ParseSpan(s string) *pb.Span {
-	firstIndex := strings.IndexByte(s, '|')
-	secondIndex := strings.IndexByte(s[firstIndex+1:], '|')
+func ParseSpan(s *Span) *pb.Span {
+	line := utils.ByteSliceToString(s.Get())
+	firstIndex := strings.IndexByte(line, '|')
+	secondIndex := strings.IndexByte(line[firstIndex+1:], '|')
 	return &pb.Span{
-		Raw:       s,
-		StartTime: s[firstIndex+1 : firstIndex+1+secondIndex],
+		Raw:       line,
+		StartTime: line[firstIndex+1 : firstIndex+1+secondIndex],
 	}
 }

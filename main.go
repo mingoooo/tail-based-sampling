@@ -17,6 +17,9 @@ var (
 
 func main() {
 	httpPort := os.Getenv("SERVER_PORT")
+	// go func() {
+	// 	log.Println(http.ListenAndServe("localhost:6060", nil))
+	// }()
 	// f, err := os.Create(fmt.Sprintf("trace_%s.out", httpPort))
 	// if err != nil {
 	// 	panic(err)

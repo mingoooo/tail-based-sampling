@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/valyala/fasthttp"
 )
@@ -62,11 +63,24 @@ func (r *Receiver) SetParamHandler(ctx *fasthttp.RequestCtx) {
 	log.Printf("Set param")
 	r.DataPort = string(ctx.QueryArgs().Peek("port"))
 	// TODO: TEST
-	// r.DataPort = "8081"
+	r.DataPort = "8082"
 	r.DataURL = fmt.Sprintf("http://127.0.0.1:%s/trace%s.data", r.DataPort, r.DataSuffix)
 
-	go r.PullData([]byte{})
+	rs, err := r.GetDataReaders()
+	if err != nil {
+		log.Fatalln(err)
+	}
 
+	go func() {
+		if err := r.Filter(rs); err != nil {
+			log.Fatalln("Filter: ", err)
+		}
+	}()
+
+	go r.StartDownload(rs)
+	// time.Sleep(5 * time.Second)
+
+	log.Printf("Reply SetParam")
 	ctx.SetStatusCode(fasthttp.StatusOK)
 }
 

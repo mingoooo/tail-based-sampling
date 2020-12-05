@@ -26,7 +26,7 @@ type Cache struct {
 	// tidToSids map[string][]string
 	// sidToSpan map[string]string
 	sync.RWMutex
-	tidToSpans  map[string][]string
+	tidToSpans  map[string][]*Span
 	cleanQueue  []string
 	size        int
 	cleanOffset int64
@@ -34,7 +34,7 @@ type Cache struct {
 
 func newCache(size int) *Cache {
 	t := &Cache{
-		tidToSpans: map[string][]string{},
+		tidToSpans: map[string][]*Span{},
 		cleanQueue: []string{},
 		size:       size,
 	}
@@ -64,7 +64,7 @@ func (c *Cache) UnsafeDelete(tid string) {
 	delete(c.tidToSpans, tid)
 }
 
-func (c *Cache) Set(tid, span string) {
+func (c *Cache) Set(tid string, span *Span) {
 	c.Lock()
 	spans := c.tidToSpans[tid]
 	c.tidToSpans[tid] = append(spans, span)
@@ -79,14 +79,14 @@ func (c *Cache) Set(tid, span string) {
 	// }
 }
 
-func (c *Cache) Get(key string) ([]string, bool) {
+func (c *Cache) Get(key string) ([]*Span, bool) {
 	c.RLock()
 	val, ok := c.tidToSpans[key]
 	c.RUnlock()
 	return val, ok
 }
 
-func (c *Cache) Drop(key string) []string {
+func (c *Cache) Drop(key string) []*Span {
 	// log.Printf("Drop trace id: %s", key)
 	c.Lock()
 	val := c.tidToSpans[key]
@@ -95,7 +95,7 @@ func (c *Cache) Drop(key string) []string {
 	return val
 }
 
-func (c *Cache) UnsafeDrop(key string) []string {
+func (c *Cache) UnsafeDrop(key string) []*Span {
 	val := c.tidToSpans[key]
 	delete(c.tidToSpans, key)
 	return val

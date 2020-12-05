@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -133,10 +134,14 @@ func (c Collector) SendFinish() {
 		log.Fatalln(err)
 		return
 	}
-	if resp.StatusCode == http.StatusOK {
-		log.Printf("Done")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s, _ := ioutil.ReadAll(resp.Body)
+		log.Printf(string(s))
+		log.Fatalln(err)
 		return
 	}
+	log.Printf("Done")
 }
 
 func (c *Collector) GetMd5BySpans(spans []*pb.Span) string {
