@@ -49,8 +49,8 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		HTTPPort:       httpPort,
 		DataSuffix:     dataSuffix,
 		Cache:          newCache(128 * 1024 * 1024),
-		endIndex:       8 * 1024 * 1024,
-		ReadLimit:      8 * 1024 * 1024,
+		endIndex:       128 * 1024 * 1024,
+		ReadLimit:      128 * 1024 * 1024,
 		curContentLen:  -1,
 		finishWg:       &sync.WaitGroup{},
 		traceCh:        make(chan *pb.Trace, 128),
@@ -58,7 +58,7 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		errTidPubCh:    make(chan *pb.TraceID, 128),
 		errTidMark:     &sync.Map{},
 		flushPosTidMap: map[uint64]string{},
-		cacheLen:       100000,
+		cacheLen:       3.5 * 1000 * 1000,
 		markerExit:     make(chan bool),
 	}
 	var err error
