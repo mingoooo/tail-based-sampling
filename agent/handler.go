@@ -46,11 +46,13 @@ func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
 	}()
 
 	go func() {
+		r.finishWg.Add(1)
 		for {
 			if err := r.Postman.ErrTraceIdPublisher(r.errTidPubCh); err != nil {
 				log.Println(err)
 				continue
 			}
+			r.finishWg.Done()
 			return
 		}
 	}()

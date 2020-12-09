@@ -29,6 +29,7 @@ type Collector struct {
 	AgentList        []string
 	AgentFinishWg    *sync.WaitGroup
 	AgentConfirmWg   *sync.WaitGroup
+	AgentSubTidWg   *sync.WaitGroup
 	TraceCache       map[string][]*pb.Span
 	TraceCacheLocker *sync.RWMutex
 	closeAgentCh     chan bool
@@ -59,6 +60,7 @@ func New(httpPort, rpcPort string, agents []string) *Collector {
 		AgentTaskChMap:   map[string]chan *pb.TraceID{},
 		AgentFinishWg:    &sync.WaitGroup{},
 		AgentConfirmWg:   &sync.WaitGroup{},
+		AgentSubTidWg:   &sync.WaitGroup{},
 		closeAgentCh:     make(chan bool, 8),
 	}
 	for _, a := range c.AgentList {

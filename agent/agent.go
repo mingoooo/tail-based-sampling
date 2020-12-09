@@ -39,16 +39,18 @@ type Receiver struct {
 	cacheLen       uint
 	flushPosTidMap map[uint]string
 	markerExit     chan bool
-	inputData      []byte
+	ringBuf        []byte
+	bufferSize     int
 	respChan       chan *respBlock
 	ReadLineChan   chan *Span
 }
 
 type respBlock struct {
-	Reader   io.Reader
-	StartIdx int
-	EndIdx   int
-	Done     sync.WaitGroup
+	Reader     io.Reader
+	StartIdx   int
+	EndIdx     int
+	ExitSignal chan bool
+	Done       sync.WaitGroup
 }
 
 type Span struct {
@@ -65,8 +67,8 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		HTTPPort:       httpPort,
 		DataSuffix:     dataSuffix,
 		Cache:          newCache(128 * 1024 * 1024),
-		endIndex:       8 * 1024 * 1024,
-		ReadLimit:      8 * 1024 * 1024,
+		endIndex:       32 * 1024 * 1024,
+		ReadLimit:      32 * 1024 * 1024,
 		curContentLen:  -1,
 		finishWg:       &sync.WaitGroup{},
 		traceCh:        make(chan *pb.Trace, 128),
@@ -74,10 +76,10 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		errTidPubCh:    make(chan *pb.TraceID, 128),
 		errTidMark:     &sync.Map{},
 		flushPosTidMap: map[uint]string{},
-		cacheLen:       150000,
+		cacheLen:       500 * 1000,
 		markerExit:     make(chan bool),
-		inputData:      make([]byte, 2*1024*1024*1024),
-		respChan:       make(chan *respBlock, 4),
+		ringBuf:        make([]byte, 2*1024*1024*1024),
+		bufferSize:     2 * 1024 * 1024 * 1024,
 		ReadLineChan:   make(chan *Span, 2*1024),
 	}
 	var err error
@@ -115,10 +117,11 @@ func (r *Receiver) httpGet() (*respBlock, error) {
 	}
 
 	rs := &respBlock{
-		Reader:   resp.Body,
-		Done:     sync.WaitGroup{},
-		StartIdx: r.startIndex,
-		EndIdx:   r.endIndex}
+		Reader:     resp.Body,
+		ExitSignal: make(chan bool, 1),
+		Done:       sync.WaitGroup{},
+		StartIdx:   r.startIndex,
+		EndIdx:     r.endIndex}
 	rs.Done.Add(1)
 	return rs, err
 }
@@ -165,12 +168,9 @@ func (r *Receiver) StartDownload(tasks []*respBlock) error {
 	log.Printf("Start download")
 	go r.readLines(tasks)
 	for _, resp := range tasks {
-		go func(rs *respBlock) {
-			if err := rs.fill(r.inputData); err != nil {
-				log.Println(err)
-				return
-			}
-		}(resp)
+		if err := resp.fill(r.ringBuf); err != nil {
+			return err
+		}
 	}
 	log.Printf("Exit download")
 	return nil
@@ -190,12 +190,12 @@ func (r *Receiver) readLines(resp []*respBlock) {
 				si -= offset
 				offset = 0
 			}
-			n := bytes.IndexByte(r.inputData[si:ei], '\n')
+			n := bytes.IndexByte(r.ringBuf[si:ei], '\n')
 			if n < 0 {
 				offset = ei - si + 1
 				break
 			}
-			r.ReadLineChan <- NewSpan(r.inputData, si, si+n+1)
+			r.ReadLineChan <- NewSpan(r.ringBuf, si, si+n+1)
 			si += n + 1
 		}
 		log.Printf("Exit read lines")
@@ -231,21 +231,21 @@ func (r *Receiver) Filter(rs []*respBlock) error {
 			}
 		}
 
-		if r.curPos <= r.cacheLen {
-			continue
-		}
+		// if r.curPos <= r.cacheLen {
+		// 	continue
+		// }
 
 		// flush trace
-		if tid, ok := r.flushPosTidMap[r.curPos]; ok {
-			if _, ok := r.errTidMark.Load(tid); ok {
-				// send error trace
-				r.SendTraceByID(tid)
-				r.errTidMark.Delete(tid)
-			} else {
-				r.Cache.UnsafeDelete(tid)
-			}
-			delete(r.flushPosTidMap, r.curPos)
-		}
+		// if tid, ok := r.flushPosTidMap[r.curPos]; ok {
+		// 	if _, ok := r.errTidMark.Load(tid); ok {
+		// 		// send error trace
+		// 		r.SendTraceByID(tid)
+		// 		r.errTidMark.Delete(tid)
+		// 	} else {
+		// 		r.Cache.UnsafeDelete(tid)
+		// 	}
+		// 	delete(r.flushPosTidMap, r.curPos)
+		// }
 	}
 	// r.dataPool.Put(reader)
 
@@ -259,8 +259,20 @@ func (r *Receiver) Filter(rs []*respBlock) error {
 		return true
 	})
 
+	close(r.errTidPubCh)
 	log.Printf("Exit filter")
 	return nil
+}
+
+func (r *Receiver) flushTrace() {
+
+	if _, ok := r.errTidMark.Load(tid); ok {
+		// send error trace
+		r.SendTraceByID(tid)
+		r.errTidMark.Delete(tid)
+	} else {
+		r.Cache.UnsafeDelete(tid)
+	}
 }
 
 func (r *Receiver) SendTraceByID(tid string) {
@@ -341,10 +353,17 @@ func NewSpan(buf []byte, startIdx, endIdx int) *Span {
 	}
 	line := s.Get()
 	tidEndIndex := bytes.IndexByte(line, '|')
+	if tidEndIndex == -1 {
+		log.Fatalf("Parse trace id error: %s", string(line))
+	}
 	s.TraceID = utils.ByteSliceToString(line[:tidEndIndex])
 
 	// filter tag
 	tagFirstIndex := bytes.LastIndexByte(line, '|')
+	if tagFirstIndex == -1 {
+		log.Fatalf("Parse trace tag error: %s", string(line))
+	}
+
 	tags := line[tagFirstIndex:]
 	if bytes.Index(tags, utils.StringToBytes("error=1")) != -1 {
 		s.Wrong = true

@@ -124,8 +124,8 @@ func (c *Collector) SendTrace(stream pb.Collector_SendTraceServer) error {
 }
 
 func (c *Collector) SubscribeTraceID(_ *empty.Empty, stream pb.Collector_SubscribeTraceIDServer) error {
-	c.AgentFinishWg.Add(1)
-	defer c.AgentFinishWg.Done()
+	c.AgentSubTidWg.Add(1)
+	defer c.AgentSubTidWg.Done()
 
 	// get agent name
 	fromAgent, ok := c.getAgentNameFromMetadata(stream.Context())
@@ -167,11 +167,14 @@ func (c *Collector) ConfirmFinish(stream pb.Collector_ConfirmFinishServer) error
 		case pb.AgentStatus_CONFIRM:
 			log.Printf("Received confirm")
 			c.AgentConfirmWg.Done()
-			// check the agent tasks has been done
+			// wait the agent tasks has been done
 			c.AgentConfirmWg.Wait()
-			log.Printf("Finish signal")
 			c.closeAgentCh <- true
+			c.AgentSubTidWg.Wait()
+			stream.Send(&pb.OK{Ok: true})
 
+		case pb.AgentStatus_CLOSED:
+			log.Printf("Finish signal")
 			// reply agent all the err trace ids has been tranferred
 			c.AgentFinishWg.Done()
 			stream.Send(&pb.OK{Ok: true})

@@ -39,6 +39,7 @@ func (p Postman) ErrTraceIdPublisher(ch <-chan *pb.TraceID) error {
 		return err
 	}
 	defer stream.CloseSend()
+	defer log.Printf("%s sended EOF in ErrTraceIdPublisher", p.AgentName)
 
 	for {
 		tid, ok := <-ch
@@ -48,7 +49,7 @@ func (p Postman) ErrTraceIdPublisher(ch <-chan *pb.TraceID) error {
 
 		err := stream.Send(tid)
 		if err == io.EOF {
-			log.Printf("%s received EOF in TracePublisher", p.AgentName)
+			log.Printf("%s received EOF in ErrTracePublisher", p.AgentName)
 			return nil
 		}
 		if err != nil {
@@ -65,6 +66,7 @@ func (p Postman) TracePublisher(ch <-chan *pb.Trace) error {
 		return err
 	}
 	defer stream.CloseSend()
+	defer log.Printf("%s sended EOF in TracePublisher", p.AgentName)
 
 	for {
 		trace, ok := <-ch
@@ -92,10 +94,12 @@ func (p Postman) TraceIDSubscriber(ch chan<- *pb.TraceID) error {
 		return err
 	}
 	defer stream.CloseSend()
+	defer log.Printf("%s sended EOF in TraceIDSubscriber", p.AgentName)
 
 	for {
 		in, err := stream.Recv()
 		if err == io.EOF {
+			close(ch)
 			log.Printf("%s received EOF in TraceIDSubscriber", p.AgentName)
 			return nil
 		}
@@ -115,14 +119,7 @@ func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidSubCh chan *pb.TraceI
 		return err
 	}
 	defer stream.CloseSend()
-
-	// wait for set remaning trace ids
-	for {
-		if len(tidPubCh) < 1 {
-			close(tidPubCh)
-			break
-		}
-	}
+	defer log.Printf("%s sended EOF in ConfirmFinish", p.AgentName)
 
 	log.Printf("Send confirm")
 	err = stream.Send(&pb.AgentStatus{Status: pb.AgentStatus_CONFIRM})
@@ -131,7 +128,8 @@ func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidSubCh chan *pb.TraceI
 	}
 
 	// Wait all the agents confirm and transfer trace ids
-	ok, err := stream.Recv()
+	_, err = stream.Recv()
+	log.Printf("%s received ok in ConfirmFinish", p.AgentName)
 	if err == io.EOF {
 		log.Printf("%s received EOF in ConfirmFinish", p.AgentName)
 		return nil
@@ -140,16 +138,23 @@ func (p *Postman) ConfirmFinish(traceCh chan *pb.Trace, tidSubCh chan *pb.TraceI
 		return err
 	}
 
-	// Wait for receive and send trace from other agents
+	// wait remaining trace from might other agents
 	for {
-		if ok.Ok && len(tidSubCh) < 1 && len(traceCh) < 1 {
-			close(tidSubCh)
+		if len(traceCh) < 1 {
 			close(traceCh)
-			return nil
+			break
 		}
-		// log.Printf("confirm tid chan len: %d", len(tidCh))
-		// log.Printf("confirm trace chan len: %d", len(traceCh))
 	}
+	// send finish signal
+	err = stream.Send(&pb.AgentStatus{Status: pb.AgentStatus_CLOSED})
+	if err != nil {
+		return err
+	}
+
+	// Wait all the agents confirm and transfer trace ids
+	_, err = stream.Recv()
+
+	return nil
 }
 
 func (p *Postman) connect() (err error) {
