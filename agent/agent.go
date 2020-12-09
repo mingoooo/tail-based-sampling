@@ -58,8 +58,9 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		errTidPubCh:    make(chan *pb.TraceID, 128),
 		errTidMark:     &sync.Map{},
 		flushPosTidMap: map[uint64]string{},
-		cacheLen:       3.5 * 1000 * 1000,
-		markerExit:     make(chan bool),
+		// cacheLen:       3.5 * 10000,
+		cacheLen:   3.5 * 1000 * 1000,
+		markerExit: make(chan bool),
 	}
 	var err error
 	r.Postman, err = NewPostman(fmt.Sprintf("127.0.0.1:%s", "8003"), r.HTTPPort)

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -17,10 +18,18 @@ import (
 	"github.com/mingoooo/tail-based-sampling/utils"
 )
 
+type result struct {
+	tid   string
+	spans []*pb.Span
+}
+
 // Collector struct
 type Collector struct {
 	pb.UnsafeCollectorServer
 	Result           map[string]string
+	resultCh         chan result
+	resultLocker     *sync.RWMutex
+	resultHandlerWg  *sync.WaitGroup
 	HTTPPort         string
 	RPCPort          string
 	DataPort         string
@@ -35,6 +44,9 @@ type Collector struct {
 
 // Run is entrypoint
 func (c *Collector) Run(ctx context.Context, cancel context.CancelFunc) error {
+	for i := 0; i <= runtime.NumCPU(); i++ {
+		go c.ResultHandler()
+	}
 	go c.closeAllAgentCh()
 	go func() {
 		err := c.RunRPCSvr()
@@ -50,6 +62,9 @@ func (c *Collector) Run(ctx context.Context, cancel context.CancelFunc) error {
 func New(httpPort, rpcPort string, agents []string) *Collector {
 	c := &Collector{
 		Result:           map[string]string{},
+		resultCh:         make(chan result, 4796),
+		resultLocker:     &sync.RWMutex{},
+		resultHandlerWg:  &sync.WaitGroup{},
 		TraceCache:       map[string][]*pb.Span{},
 		TraceCacheLocker: &sync.RWMutex{},
 		HTTPPort:         httpPort,
@@ -94,7 +109,9 @@ func (c Collector) SendFinish() {
 	c.AgentFinishWg.Wait()
 	log.Printf("Flush result")
 	// time.Sleep(5 * time.Second)
+	c.TraceCacheLocker.Lock()
 	c.FlushResult()
+	c.TraceCacheLocker.Unlock()
 
 	// TODO: Manually check md5 for testing
 	/**
@@ -153,11 +170,31 @@ func (c *Collector) GetMd5BySpans(spans []*pb.Span) string {
 	return strings.ToUpper(hex.EncodeToString(m.Sum(nil)))
 }
 
+func (c *Collector) ResultHandler() {
+	c.resultHandlerWg.Add(1)
+	defer c.resultHandlerWg.Done()
+	for {
+		res, ok := <-c.resultCh
+		if !ok {
+			return
+		}
+		m := c.GetMd5BySpans(res.spans)
+		c.resultLocker.Lock()
+		c.Result[res.tid] = m
+		c.resultLocker.Unlock()
+	}
+
+}
+
 func (c *Collector) FlushResult() {
 	for tid, spans := range c.TraceCache {
-		m := c.GetMd5BySpans(spans)
-		c.Result[tid] = m
+		c.resultCh <- result{
+			tid:   tid,
+			spans: spans,
+		}
 	}
+	close(c.resultCh)
+	c.resultHandlerWg.Wait()
 }
 
 func (c *Collector) FlushTrace(tid string) {

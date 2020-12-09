@@ -108,13 +108,15 @@ func (c *Collector) SendTrace(stream pb.Collector_SendTraceServer) error {
 
 		// store trace
 		// log.Printf("Received trace: %s", trace.TraceID)
-		c.TraceCacheLocker.Lock()
 		// Store into cache
+		c.TraceCacheLocker.Lock()
 		if spans, ok := c.TraceCache[trace.TraceID]; ok {
-			c.TraceCache[trace.TraceID] = append(spans, trace.SpanList...)
 			// flush trace to result
-			// c.FlushTrace(trace.TraceID)
-			// delete(c.TraceCache, trace.TraceID)
+			c.resultCh <- result{
+				tid:   trace.TraceID,
+				spans: append(spans, trace.SpanList...),
+			}
+			delete(c.TraceCache, trace.TraceID)
 		} else {
 			c.TraceCache[trace.TraceID] = trace.SpanList
 		}
