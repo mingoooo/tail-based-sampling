@@ -54,6 +54,15 @@ func (r *Receiver) ReadyHTTPHandler(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	}()
+	go func() {
+		for {
+			if err := r.Filter(); err != nil {
+				log.Println(err)
+				continue
+			}
+			return
+		}
+	}()
 
 	ctx.SetStatusCode(fasthttp.StatusOK)
 }
@@ -62,10 +71,14 @@ func (r *Receiver) SetParamHandler(ctx *fasthttp.RequestCtx) {
 	log.Printf("Set param")
 	r.DataPort = string(ctx.QueryArgs().Peek("port"))
 	// TODO: TEST
-	// r.DataPort = "8081"
+	r.DataPort = "8082"
 	r.DataURL = fmt.Sprintf("http://127.0.0.1:%s/trace%s.data", r.DataPort, r.DataSuffix)
 
-	go r.PullData([]byte{})
+	if resps, err := r.GetDataReaders(); err == nil {
+		go r.Download(resps)
+	} else {
+		log.Fatalln(err)
+	}
 
 	ctx.SetStatusCode(fasthttp.StatusOK)
 }

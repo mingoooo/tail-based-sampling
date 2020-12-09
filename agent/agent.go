@@ -14,6 +14,11 @@ import (
 	"github.com/mingoooo/tail-based-sampling/utils"
 )
 
+var (
+	TraceIDPool = &sync.Pool{}
+	TracePool   = &sync.Pool{}
+)
+
 // Receiver struct
 type Receiver struct {
 	HTTPPort       string
@@ -35,6 +40,7 @@ type Receiver struct {
 	cacheLen       uint64
 	flushPosTidMap map[uint64]string
 	markerExit     chan bool
+	readChan       chan []byte
 }
 
 type Span struct {
@@ -61,6 +67,7 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		// cacheLen:       3.5 * 10000,
 		cacheLen:   3.5 * 1000 * 1000,
 		markerExit: make(chan bool),
+		readChan:   make(chan []byte, 4896),
 	}
 	var err error
 	r.Postman, err = NewPostman(fmt.Sprintf("127.0.0.1:%s", "8003"), r.HTTPPort)
@@ -77,20 +84,9 @@ func (r Receiver) Run(ctx context.Context, cancel context.CancelFunc) (err error
 	return
 }
 
-func (r *Receiver) getRange() (int64, error) {
-	req, err := http.NewRequest("HEAD", r.DataURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	return resp.ContentLength, nil
-}
+func (r *Receiver) httpGet() (io.Reader, error) {
+	log.Printf("Pulling data... URL:%s \nstart index: %d\nend index: %d", r.DataURL, r.startIndex, r.endIndex)
 
-func (r *Receiver) httpGet() (io.ReadCloser, error) {
-	// log.Printf("Pulling data... URL:%s \nstart index: %d\nend index: %d", r.DataURL, r.startIndex, r.endIndex)
 	req, err := http.NewRequest("GET", r.DataURL, nil)
 	if err != nil {
 		return nil, err
@@ -106,26 +102,32 @@ func (r *Receiver) httpGet() (io.ReadCloser, error) {
 		r.startIndex, r.endIndex = r.endIndex+1, r.endIndex+r.ReadLimit
 		r.curContentLen = resp.ContentLength
 	}
+
 	return resp.Body, err
 }
 
-func (r *Receiver) PullData(preTail []byte) error {
-	defer r.finishWg.Done()
-
+func (r *Receiver) GetDataReaders() (rs []io.Reader, err error) {
 	for {
 		if r.curContentLen != -1 && r.curContentLen < r.ReadLimit {
-			break
+			return rs, err
 		}
 		resp, err := r.httpGet()
 		if err != nil {
-			return err
+			return rs, err
 		}
-		defer resp.Close()
 
-		reader := bufio.NewReader(resp)
+		rs = append(rs, resp)
+	}
+}
+
+func (r *Receiver) Download(resps []io.Reader) error {
+	defer close(r.readChan)
+	preTail := []byte{}
+
+	for _, resp := range resps {
 		for {
+			reader := bufio.NewReader(resp)
 			line, err := reader.ReadBytes('\n')
-			// log.Printf(string(line))
 			if len(preTail) > 0 {
 				line = append(preTail, line...)
 				preTail = []byte{}
@@ -136,44 +138,57 @@ func (r *Receiver) PullData(preTail []byte) error {
 			} else if err != nil {
 				return err
 			}
-
-			// TODO: slop
-			r.curPos++
-			s := NewSpan(line)
-
-			// mark flush pos if not exist
-			if _, ok := r.Cache.Get(s.TraceID); !ok {
-				r.flushPosTidMap[r.curPos+r.cacheLen] = s.TraceID
-			}
-
-			// stroe into cache
-			r.setCache(s.TraceID, s.Raw)
-
-			if s.Wrong {
-				// log.Printf("Set trace ID: %s", s.TraceID)
-				if _, ok := r.errTidMark.LoadOrStore(s.TraceID, true); !ok {
-					// send wrong trace id to backend
-					r.SetErrTraceID(s.TraceID)
-				}
-			}
-
-			if r.curPos <= r.cacheLen {
-				continue
-			}
-
-			// flush trace
-			if tid, ok := r.flushPosTidMap[r.curPos]; ok {
-				if _, ok := r.errTidMark.Load(tid); ok {
-					// send error trace
-					r.SendTraceByID(tid)
-					r.errTidMark.Delete(tid)
-				} else {
-					r.Cache.UnsafeDelete(tid)
-				}
-				delete(r.flushPosTidMap, r.curPos)
-			}
-
+			r.readChan <- line
 		}
+	}
+	return nil
+}
+
+func (r *Receiver) Filter() error {
+	defer r.finishWg.Done()
+
+	for {
+		line, ok := <-r.readChan
+		if !ok {
+			break
+		}
+		// log.Printf(string(line))
+		// TODO: slop
+		s := NewSpan(line)
+
+		// mark flush pos if not exist
+		if _, ok := r.Cache.Get(s.TraceID); !ok {
+			r.flushPosTidMap[r.curPos+r.cacheLen] = s.TraceID
+		}
+
+		// stroe into cache
+		r.setCache(s.TraceID, s.Raw)
+
+		if s.Wrong {
+			// log.Printf("Set trace ID: %s", s.TraceID)
+			if _, ok := r.errTidMark.LoadOrStore(s.TraceID, true); !ok {
+				// send wrong trace id to backend
+				r.SetErrTraceID(s.TraceID)
+			}
+		}
+		r.curPos++
+
+		if r.curPos <= r.cacheLen {
+			continue
+		}
+
+		// flush trace
+		if tid, ok := r.flushPosTidMap[r.curPos]; ok {
+			if _, ok := r.errTidMark.Load(tid); ok {
+				// send error trace
+				r.SendTraceByID(tid)
+				r.errTidMark.Delete(tid)
+			} else {
+				r.Cache.UnsafeDelete(tid)
+			}
+			delete(r.flushPosTidMap, r.curPos)
+		}
+
 	}
 
 	log.Printf("All the data has been pulled")
