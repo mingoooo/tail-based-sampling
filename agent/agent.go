@@ -15,8 +15,8 @@ import (
 )
 
 var (
-	TraceIDPool = &sync.Pool{}
-	TracePool   = &sync.Pool{}
+	TraceIDPool = &sync.Pool{New: func() interface{} { return &pb.TraceID{} }}
+	TracePool   = &sync.Pool{New: func() interface{} { return &pb.Trace{} }}
 )
 
 // Receiver struct
@@ -55,8 +55,8 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		HTTPPort:       httpPort,
 		DataSuffix:     dataSuffix,
 		Cache:          newCache(128 * 1024 * 1024),
-		endIndex:       128 * 1024 * 1024,
-		ReadLimit:      128 * 1024 * 1024,
+		endIndex:       64 * 1024 * 1024,
+		ReadLimit:      64 * 1024 * 1024,
 		curContentLen:  -1,
 		finishWg:       &sync.WaitGroup{},
 		traceCh:        make(chan *pb.Trace, 128),
@@ -84,7 +84,7 @@ func (r Receiver) Run(ctx context.Context, cancel context.CancelFunc) (err error
 	return
 }
 
-func (r *Receiver) httpGet() (io.Reader, error) {
+func (r *Receiver) httpGet() (io.ReadCloser, error) {
 	log.Printf("Pulling data... URL:%s \nstart index: %d\nend index: %d", r.DataURL, r.startIndex, r.endIndex)
 
 	req, err := http.NewRequest("GET", r.DataURL, nil)
@@ -125,8 +125,8 @@ func (r *Receiver) Download(resps []io.Reader) error {
 	preTail := []byte{}
 
 	for _, resp := range resps {
+		reader := bufio.NewReader(resp)
 		for {
-			reader := bufio.NewReader(resp)
 			line, err := reader.ReadBytes('\n')
 			if len(preTail) > 0 {
 				line = append(preTail, line...)
@@ -233,9 +233,9 @@ func (r *Receiver) TraceMarker() {
 }
 
 func (r *Receiver) SetErrTraceID(tid string) {
-	r.errTidPubCh <- &pb.TraceID{
-		ID: tid,
-	}
+	traceid := TraceIDPool.Get().(*pb.TraceID)
+	traceid.ID = tid
+	r.errTidPubCh <- traceid
 }
 
 func (r *Receiver) DropTraceByID(tid string) (*pb.Trace, bool) {

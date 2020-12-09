@@ -75,7 +75,11 @@ func (r *Receiver) SetParamHandler(ctx *fasthttp.RequestCtx) {
 	r.DataURL = fmt.Sprintf("http://127.0.0.1:%s/trace%s.data", r.DataPort, r.DataSuffix)
 
 	if resps, err := r.GetDataReaders(); err == nil {
-		go r.Download(resps)
+		go func() {
+			if err = r.Download(resps); err != nil {
+				log.Fatalln(err)
+			}
+		}()
 	} else {
 		log.Fatalln(err)
 	}

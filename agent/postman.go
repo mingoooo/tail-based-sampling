@@ -72,7 +72,7 @@ func (p Postman) TracePublisher(ch <-chan *pb.Trace) error {
 			return nil
 		}
 
-		// log.Println(trace.TraceID)
+		log.Println(trace.TraceID)
 		err := stream.Send(trace)
 		if err == io.EOF {
 			log.Printf("%s received EOF in TracePublisher", p.AgentName)
