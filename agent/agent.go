@@ -264,7 +264,7 @@ func (r *Receiver) Filter(rs []*respBlock) error {
 	return nil
 }
 
-func (r *Receiver) flushTrace() {
+func (r *Receiver) flushTrace(tid string) {
 
 	if _, ok := r.errTidMark.Load(tid); ok {
 		// send error trace
