@@ -58,8 +58,14 @@ func (c *Collector) Run(ctx context.Context, cancel context.CancelFunc) error {
 	return nil
 }
 
+type Cfg struct {
+	HttpPort string
+	RpcPort  string
+	Agents   []string
+}
+
 // New collector
-func New(httpPort, rpcPort string, agents []string) *Collector {
+func New(cfg *Cfg) *Collector {
 	c := &Collector{
 		Result:           map[string]string{},
 		resultCh:         make(chan result, 4796),
@@ -67,9 +73,9 @@ func New(httpPort, rpcPort string, agents []string) *Collector {
 		resultHandlerWg:  &sync.WaitGroup{},
 		TraceCache:       map[string][]*pb.Span{},
 		TraceCacheLocker: &sync.RWMutex{},
-		HTTPPort:         httpPort,
-		RPCPort:          rpcPort,
-		AgentList:        agents,
+		HTTPPort:         cfg.HttpPort,
+		RPCPort:          cfg.RpcPort,
+		AgentList:        cfg.Agents,
 		AgentTaskChMap:   map[string]chan *pb.TraceID{},
 		AgentFinishWg:    &sync.WaitGroup{},
 		AgentConfirmWg:   &sync.WaitGroup{},

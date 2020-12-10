@@ -12,7 +12,14 @@ import (
 )
 
 var (
-	httpPort string
+	AgentCfg = agent.Cfg{
+		CacheLen:  3.5 * 1000 * 1000,
+		ReadLimit: 512 * 1024 * 1024,
+	}
+	CollectorCfg = collector.Cfg{
+		RpcPort: "8003",
+		Agents:  []string{"8000", "8001"},
+	}
 )
 
 func main() {
@@ -32,7 +39,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	switch httpPort {
 	case "8000":
-		a, err := agent.New(httpPort, "1")
+		cfg := AgentCfg
+		cfg.HttpPort = httpPort
+		cfg.DataSuffix = "1"
+		a, err := agent.New(&cfg)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -40,7 +50,10 @@ func main() {
 			log.Fatal(err)
 		}
 	case "8001":
-		a, err := agent.New(httpPort, "2")
+		cfg := AgentCfg
+		cfg.HttpPort = httpPort
+		cfg.DataSuffix = "2"
+		a, err := agent.New(&cfg)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -48,7 +61,9 @@ func main() {
 			log.Fatal(err)
 		}
 	case "8002":
-		c := collector.New(httpPort, "8003", []string{"8000", "8001"})
+		cfg := CollectorCfg
+		cfg.HttpPort = httpPort
+		c := collector.New(&cfg)
 		if err := c.Run(ctx, cancel); err != nil {
 			log.Fatal(err)
 		}

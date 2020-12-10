@@ -23,33 +23,15 @@ import (
 // }
 
 type Cache struct {
-	// tidToSids map[string][]string
-	// sidToSpan map[string]string
 	sync.RWMutex
 	tidToSpans  map[string][]string
-	cleanQueue  []string
-	size        int
-	cleanOffset int64
 }
 
-func newCache(size int) *Cache {
+func newCache() *Cache {
 	t := &Cache{
 		tidToSpans: map[string][]string{},
-		cleanQueue: []string{},
-		size:       size,
 	}
 	return t
-}
-
-func (c *Cache) Clean(n int64) {
-	cleanLen := n - c.cleanOffset
-	// log.Println(cleanLen)
-	for _, tid := range c.cleanQueue[:cleanLen] {
-		c.Delete(tid)
-	}
-	c.cleanQueue = c.cleanQueue[cleanLen:]
-	// TODO: slop
-	c.cleanOffset = n
 }
 
 func (c *Cache) Delete(tid string) {
@@ -69,14 +51,6 @@ func (c *Cache) Set(tid, span string) {
 	spans := c.tidToSpans[tid]
 	c.tidToSpans[tid] = append(spans, span)
 	c.Unlock()
-	// c.cleanQueue = append(c.cleanQueue, tid)
-	// if !exist {
-	// 	c.tidChan <- tid
-	// 	// if len(c.tidChan) >= c.size {
-	// 	// 	log.Printf("Clean cache")
-	// 	// 	c.cleanWorker()
-	// 	// }
-	// }
 }
 
 func (c *Cache) Get(key string) ([]string, bool) {
