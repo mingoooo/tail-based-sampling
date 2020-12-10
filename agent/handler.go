@@ -64,7 +64,7 @@ func (r *Receiver) SetParamHandler(ctx *fasthttp.RequestCtx) {
 	log.Printf("Set param")
 	r.DataPort = string(ctx.QueryArgs().Peek("port"))
 	// TODO: TEST
-	r.DataPort = "8082"
+	// r.DataPort = "8081"
 	r.DataURL = fmt.Sprintf("http://127.0.0.1:%s/trace%s.data", r.DataPort, r.DataSuffix)
 
 	rs, err := r.GetDataReaders()
@@ -79,6 +79,7 @@ func (r *Receiver) SetParamHandler(ctx *fasthttp.RequestCtx) {
 	}()
 
 	go r.StartDownload(rs)
+	go r.readLines(rs)
 	// time.Sleep(5 * time.Second)
 
 	log.Printf("Reply SetParam")

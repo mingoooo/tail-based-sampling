@@ -16,6 +16,7 @@ import (
 var (
 	TracePool   = sync.Pool{New: func() interface{} { return &pb.Trace{} }}
 	TraceIDPool = sync.Pool{New: func() interface{} { return &pb.TraceID{} }}
+	ReadPos     = int64(10 * 1024 * 1024)
 )
 
 // Receiver struct
@@ -49,8 +50,10 @@ type respBlock struct {
 	Reader     io.Reader
 	StartIdx   int
 	EndIdx     int
-	ExitSignal chan bool
+	ExitSignal chan struct{}
 	Done       sync.WaitGroup
+	readIdx    int
+	writeIdx   int
 }
 
 type Span struct {
@@ -67,8 +70,8 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		HTTPPort:       httpPort,
 		DataSuffix:     dataSuffix,
 		Cache:          newCache(128 * 1024 * 1024),
-		endIndex:       32 * 1024 * 1024,
-		ReadLimit:      32 * 1024 * 1024,
+		endIndex:       256 * 1024 * 1024,
+		ReadLimit:      256 * 1024 * 1024,
 		curContentLen:  -1,
 		finishWg:       &sync.WaitGroup{},
 		traceCh:        make(chan *pb.Trace, 128),
@@ -76,7 +79,7 @@ func New(httpPort string, dataSuffix string) (*Receiver, error) {
 		errTidPubCh:    make(chan *pb.TraceID, 128),
 		errTidMark:     &sync.Map{},
 		flushPosTidMap: map[uint]string{},
-		cacheLen:       500 * 1000,
+		cacheLen:       3.3 * 1000 * 1000,
 		markerExit:     make(chan bool),
 		ringBuf:        make([]byte, 2*1024*1024*1024),
 		bufferSize:     2 * 1024 * 1024 * 1024,
@@ -110,20 +113,25 @@ func (r *Receiver) httpGet() (*respBlock, error) {
 		return nil, err
 	}
 
-	switch resp.StatusCode {
-	case http.StatusPartialContent, http.StatusOK:
-		r.startIndex, r.endIndex = r.endIndex+1, r.endIndex+r.ReadLimit
-		r.curContentLen = int(resp.ContentLength)
-	}
-
 	rs := &respBlock{
 		Reader:     resp.Body,
-		ExitSignal: make(chan bool, 1),
+		ExitSignal: make(chan struct{}),
 		Done:       sync.WaitGroup{},
 		StartIdx:   r.startIndex,
-		EndIdx:     r.endIndex}
+		EndIdx:     r.endIndex,
+		readIdx:    int(ReadPos),
+		writeIdx:   int(ReadPos),
+	}
+	r.startIndex, r.endIndex = r.endIndex+1, r.endIndex+r.ReadLimit
+	r.curContentLen = int(resp.ContentLength)
+	ReadPos += int64(resp.ContentLength)
+	if int(ReadPos)+r.ReadLimit > r.bufferSize {
+		ReadPos = 10 * 1024 * 1024
+	}
+
 	rs.Done.Add(1)
 	return rs, err
+
 }
 
 func (r *Receiver) GetDataReaders() (rs []*respBlock, err error) {
@@ -145,28 +153,31 @@ func (r *respBlock) fill(buf []byte) (err error) {
 	defer r.Done.Done()
 	defer log.Printf("Exit fill")
 	// readSize := 8 * 1024 * 1024
-	n := 0
-	i := r.StartIdx
-	for {
-		// if i+readSize <= r.EndIdx {
-		// 	n, err = io.ReadAtLeast(r.Reader, buf[i:], readSize)
-		// } else {
-		n, err = r.Reader.Read(buf[i:])
-		// }
 
-		if err == io.EOF {
+	n := 0
+	for {
+		select {
+		case <-r.ExitSignal:
 			return nil
+		default:
+			n, err = r.Reader.Read(buf[r.writeIdx:])
+			r.writeIdx += n
+
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				continue
+			}
 		}
-		if err != nil {
-			return err
-		}
-		i += n
 	}
 }
 
 func (r *Receiver) StartDownload(tasks []*respBlock) error {
 	log.Printf("Start download")
-	go r.readLines(tasks)
 	for _, resp := range tasks {
 		if err := resp.fill(r.ringBuf); err != nil {
 			return err
@@ -176,30 +187,73 @@ func (r *Receiver) StartDownload(tasks []*respBlock) error {
 	return nil
 }
 
-func (r *Receiver) readLines(resp []*respBlock) {
+func (r *Receiver) readLines(resp []*respBlock) (err error) {
 	defer close(r.ReadLineChan)
+	readSize := 64 * 1024 * 1024
 
 	offset := 0
 	for _, reader := range resp {
+		close(reader.ExitSignal)
 		reader.Done.Wait()
 		log.Printf("Read lines")
+
+		n := 0
 		si := reader.StartIdx
+		ri := reader.readIdx
+		wi := reader.writeIdx
 		ei := reader.EndIdx
+
+		if ri > si {
+			offset = r.splitLine(ri, wi, offset)
+		}
+
 		for {
-			if offset != 0 {
-				si -= offset
-				offset = 0
+
+			if ri+readSize <= ei {
+				n, err = io.ReadAtLeast(reader.Reader, r.ringBuf[wi:], readSize)
+			} else {
+				n, err = reader.Reader.Read(r.ringBuf[wi:])
 			}
-			n := bytes.IndexByte(r.ringBuf[si:ei], '\n')
-			if n < 0 {
-				offset = ei - si + 1
+
+			if n > 0 {
+				offset = r.splitLine(wi, wi+n, offset)
+				ri += n
+			}
+
+			if err == io.EOF {
 				break
 			}
-			r.ReadLineChan <- NewSpan(r.ringBuf, si, si+n+1)
-			si += n + 1
+			if err != nil {
+				return err
+			}
 		}
+
 		log.Printf("Exit read lines")
 	}
+	return nil
+}
+
+func (r *Receiver) splitLine(si, ei, offset int) int {
+	for si != ei {
+		if offset != 0 {
+			si -= offset
+			if si < 10*1024*1024 {
+				copy(r.ringBuf[si-offset:], r.ringBuf[r.bufferSize-offset:])
+			}
+			offset = 0
+		}
+		n := bytes.IndexByte(r.ringBuf[si:ei], '\n')
+
+		if n < 0 {
+			return ei - si
+		} else if n == 0 {
+			return 0
+		}
+
+		r.ReadLineChan <- NewSpan(r.ringBuf, si, si+n+1)
+		si += n + 1
+	}
+	return 0
 }
 
 func (r *Receiver) Filter(rs []*respBlock) error {
@@ -231,21 +285,21 @@ func (r *Receiver) Filter(rs []*respBlock) error {
 			}
 		}
 
-		// if r.curPos <= r.cacheLen {
-		// 	continue
-		// }
+		if r.curPos <= r.cacheLen {
+			continue
+		}
 
 		// flush trace
-		// if tid, ok := r.flushPosTidMap[r.curPos]; ok {
-		// 	if _, ok := r.errTidMark.Load(tid); ok {
-		// 		// send error trace
-		// 		r.SendTraceByID(tid)
-		// 		r.errTidMark.Delete(tid)
-		// 	} else {
-		// 		r.Cache.UnsafeDelete(tid)
-		// 	}
-		// 	delete(r.flushPosTidMap, r.curPos)
-		// }
+		if tid, ok := r.flushPosTidMap[r.curPos]; ok {
+			if _, ok := r.errTidMark.Load(tid); ok {
+				// send error trace
+				r.SendTraceByID(tid)
+				r.errTidMark.Delete(tid)
+			} else {
+				r.Cache.UnsafeDelete(tid)
+			}
+			delete(r.flushPosTidMap, r.curPos)
+		}
 	}
 	// r.dataPool.Put(reader)
 
